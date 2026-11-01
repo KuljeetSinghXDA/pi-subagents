@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setDefaultsDisabled } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -83,6 +84,7 @@ describe("toolDescriptionMode", () => {
     // previous test left it. Reset it so each setup()'s settings decide, and
     // so the "default" assertions below really test the default.
     setWorktreeIsolationEnabled(true);
+    setDefaultsDisabled(false);
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -288,6 +290,35 @@ describe("toolDescriptionMode", () => {
   // TEXT expansion was tested — nothing asserted the schema itself, so the
   // parameter could keep costing tokens (and stay callable) while the prose
   // claimed otherwise.
+  // #330: the exploration guideline named Explore even when it could not be
+  // spawned. Claude Code adds its version of the line only when Explore is
+  // available (`suggestsExploreAgent`), so the example follows availability.
+  describe("the exploration guideline names Explore only when it can be spawned", () => {
+    const exploreLine = (tools: Map<string, any>) =>
+      (tools.get("Agent").promptGuidelines as string[]).find((g) => g.startsWith("For broad codebase exploration"));
+
+    it("suggests Explore by default", () => {
+      expect(exploreLine(setup())).toContain("Explore");
+    });
+
+    it("drops the example when the built-in agents are disabled", () => {
+      const line = exploreLine(setup({ disableDefaultAgents: true }));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("Explore");
+    });
+
+    it("drops the example when an agent file disables Explore", () => {
+      const line = exploreLine(
+        setup(undefined, () => {
+          mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+          writeFileSync(join(tmpDir, ".pi", "agents", "Explore.md"), "---\ndescription: off\nenabled: false\n---\nbody");
+        }),
+      );
+      expect(line).toBeDefined();
+      expect(line).not.toContain("Explore");
+    });
+  });
+
   describe("schedulingEnabled gates the schedule parameter", () => {
     const props = (tools: Map<string, any>) =>
       Object.keys(tools.get("Agent").parameters?.properties ?? {});
@@ -416,6 +447,22 @@ describe("toolDescriptionMode", () => {
       const tools = withAgent("narrow", "tools: read, grep");
       const desc: string = tools.get("Agent").description;
       expect(desc).toContain("- narrow: narrow agent. (Tools: read, grep)");
+    });
+
+    // Bare `mcp__` entries narrow MCP tools on top of the built-in list, so a
+    // suffix that named only the built-ins would describe a narrower agent than
+    // the one that spawns (extension-scope.ts installExtensionToolScope).
+    it("names the bare mcp__ entries next to the built-ins they narrow", () => {
+      const tools = withAgent("mcp", "tools: read, mcp__radius__*");
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- mcp: mcp agent. (Tools: read, mcp__radius__*)");
+    });
+
+    it("an mcp__-only scope is described by its MCP entries, not as unknown extension tools", () => {
+      const tools = withAgent("mcponly", "tools: mcp__radius, mcp__github__search");
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("- mcponly: mcponly agent. (Tools: mcp__radius__*, mcp__github__search)");
+      expect(desc).not.toContain("- mcponly: mcponly agent. (Tools: no built-ins, extension tools only)");
     });
   });
 });

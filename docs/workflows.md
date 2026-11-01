@@ -60,10 +60,10 @@ A **card in the transcript**, updating as the run goes:
 ▸ SubagentWorkflow  auth-audit                       3/7 agents · 1m12s
   Find routes missing auth checks, then verify each finding
   ╭─ Scan
-  │ └─ ✔ discover        · Explore · haiku 4.5 · 26.4k · 8 tool calls · 25s
+  │ └─ ✔ discover        · Explore · sonnet 4.5 · 26.4k · 8 tool calls · 25s
   ╰─ Audit
-    ├─ ✔ audit:src/a.ts  · Explore · haiku 4.5 · 18.4k · 12 tool calls · 42s
-    ├─ ⟳ audit:src/b.ts  · Explore · haiku 4.5 · 8 tool calls · 21s
+    ├─ ✔ audit:src/a.ts  · Explore · sonnet 4.5 · 18.4k · 12 tool calls · 42s
+    ├─ ⟳ audit:src/b.ts  · Explore · sonnet 4.5 · 8 tool calls · 21s
     └─ ⟳ audit:src/c.ts
   ⎿  auditing 6 route files
 ```
@@ -249,6 +249,8 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to `general-purpose` silently.
 
 Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
+
+A child stays resumable for the whole run. The manager evicts a finished child's record about ten minutes after it settles (once its result was read), and a review or a merge queue easily takes longer; `resume` then reopens the child's saved session under the same id, still owned by the run. That reopen runs under the agent type's current definition, so the model and tree the script chose for the first run are not carried over. It fails, resolving to `null` with the reason on that agent's row, when the child's session was never saved (`rememberAgents` off, or `persist_session: false`), its file is gone, or it ran with `isolation: "worktree"` and left changes: that worktree was removed when the child finished, with its changes on a branch, and continuing the work anywhere else would split it. A child whose worktree held no changes reopens in the run's directory, as in Claude Code.
 
 ### `pipeline()` and `parallel()`
 

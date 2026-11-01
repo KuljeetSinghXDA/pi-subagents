@@ -503,8 +503,11 @@ export default function (pi: ExtensionAPI) {
 
   if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
 
+  const resolveMention = (name: string) => manager.resolveMention(name);
+
   registerToolReportingUsage(pi, createGetResultTool({
     resolveAgentRef,
+    resolveMention,
     isShowCostEnabled,
     outbox,
     pi,
@@ -512,6 +515,7 @@ export default function (pi: ExtensionAPI) {
 
   registerToolReportingUsage(pi, createSteerTool({
     resolveAgentRef,
+    resolveMention,
     isShowCostEnabled,
     outbox,
     pi,
@@ -519,6 +523,7 @@ export default function (pi: ExtensionAPI) {
 
   registerToolReportingUsage(pi, createAnswerTool({
     resolveAgentRef,
+    resolveMention,
     isShowCostEnabled,
     outbox,
     pi,

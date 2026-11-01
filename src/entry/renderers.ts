@@ -176,20 +176,29 @@ export function buildNotificationDetails(record: AgentRecord, resultMaxLen: numb
 
 /**
  * Format an agent's tool scope for the Agent tool description.
+ *
+ * Bare `mcp__` entries narrow MCP tools on top of the built-in list, so they are
+ * named after it — an agent with `tools: read, mcp__radius__*` that advertised
+ * `read` alone would read as narrower than it is.
  */
 export function formatToolsSuffix(cfg: AgentConfig | undefined): string {
   const tools = cfg?.builtinToolNames;
-  if (!tools) return "*";
+  const mcp = cfg?.mcpToolPatterns ?? [];
+  const withMcp = (suffix: string) => (mcp.length > 0 ? [suffix, ...mcp].join(", ") : suffix);
+  if (!tools) return withMcp("*");
   if (tools.length === 0) {
     // `isolated` overrides extensions to false in the runner, so both mean the
     // agent has no extension tools either — and then it truly has nothing.
     const noExtensionTools = cfg?.isolated === true || cfg?.extensions === false;
-    return noExtensionTools ? "none" : "no built-ins, extension tools only";
+    if (noExtensionTools) return "none";
+    // An `mcp__`-only scope names the MCP tools it does reach; "extension tools
+    // only" would leave out that they are narrowed.
+    return mcp.length > 0 ? mcp.join(", ") : "no built-ins, extension tools only";
   }
   const isFullSet =
     tools.length === BUILTIN_TOOL_NAMES.length
     && BUILTIN_TOOL_NAMES.every((t) => tools.includes(t));
-  return isFullSet ? "*" : tools.join(", ");
+  return withMcp(isFullSet ? "*" : tools.join(", "));
 }
 
 /** CLI flag that runs a workflow script at session start. */

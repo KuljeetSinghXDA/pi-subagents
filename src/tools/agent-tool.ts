@@ -1,12 +1,13 @@
-import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "../agent-record-entry.js";
 import { getDefaultMaxTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES } from "../agent-runner.js";
-import { getAgentConfig, resolveSpawnType, resolveType } from "../agent-types.js";
+import { getAgentConfig, getAvailableTypes, resolveSpawnType, resolveType } from "../agent-types.js";
 import { buildDetails, createActivityTracker, formatLifetimeTokens, textResult } from "../entry/renderers.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "../invocation-config.js";
 import { describeModel, resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
-import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "../output-file.js";
+import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "../output-file.js";
 import type { SubagentScheduler } from "../schedule.js";
 import type { ToolDescriptionMode } from "../settings.js";
 import { getForegroundOutcomeNote, partialOutputSuffix } from "../status-note.js";
@@ -90,7 +91,9 @@ export function createAgentTool(deps: AgentToolDeps) {
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
+      // Names Explore only when it can be spawned, as Claude Code does (#330).
+      // Read at registration, like the type list in the description.
+      `For broad codebase exploration or research, spawn Agent with an appropriate subagent_type${getAvailableTypes().includes("Explore") ? " (e.g. Explore)" : ""}. Otherwise use direct tools (read, grep, find) when the target is already known.`,
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
@@ -104,9 +107,43 @@ export function createAgentTool(deps: AgentToolDeps) {
       return renderAgentToolResult(result, options, theme, renderContext, isShowCostEnabled());
     },
 
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (toolCallId, callParams, signal, onUpdate, ctx) => {
       widget.setUICtx(ctx.ui as UICtx);
       reloadCustomAgents();
+
+      // A resume whose record is gone — evicted ten minutes after it finished,
+      // or lost to a reload or restart — reopens the agent from the session's
+      // saved record of it, under the same id, as Claude Code resumes from the
+      // transcript on disk. This is an ordinary spawn carrying a session file,
+      // like the `@handle` path's, so it runs through the spawn branches below
+      // and picks up the widget, fleet row, transcript, join batching and
+      // completion notification unchanged. Only the prompt, the turn budget and
+      // run_in_background carry over from the call: like a live resume, it
+      // ignores `subagent_type`, model and the rest, and runs under the agent
+      // type's current definition.
+      // `schedule` is left to its own branch, which refuses the combination.
+      const saved = callParams.resume !== undefined && !callParams.schedule
+        && manager.getRecord(callParams.resume) === undefined
+        ? findAgentRecordEntry(ctx, callParams.resume)
+        : undefined;
+      let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
+      if (saved !== undefined) {
+        const reopen = reopenTarget(saved.type, saved.sessionFile, saved.worktreeLost);
+        if (!reopen.ok) return textResult(`Agent "${saved.id}" cannot be resumed — ${reopen.reason}.`);
+        reopenOptions = {
+          resumeSessionFile: reopen.sessionFile,
+          reclaim: { id: saved.id, handle: saved.handle, alias: saved.alias },
+        };
+      }
+      const params: typeof callParams = saved === undefined ? callParams : {
+        prompt: callParams.prompt,
+        description: saved.description,
+        subagent_type: saved.type,
+        run_in_background: callParams.run_in_background,
+        max_turns: callParams.max_turns,
+        isolation: undefined,
+        schedule: undefined,
+      };
 
       const rawType = params.subagent_type as SubagentType;
       const dispatch = resolveSpawnType(rawType);
@@ -156,8 +193,16 @@ export function createAgentTool(deps: AgentToolDeps) {
       const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
         if (!rec || !outputTranscript) return;
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-        writeInitialEntry(rec.outputFile, agentId, params.prompt as string, ctx.cwd);
+        // A reopened agent keeps its id, so this is the transcript its earlier
+        // runs wrote: append to it, as a live resume does, never truncate it.
+        if (reopenOptions) ensureOutputFile(rec.outputFile);
+        else writeInitialEntry(rec.outputFile, agentId, params.prompt as string, ctx.cwd);
       };
+      // Where a reopened agent's transcript stream starts: past the turns the
+      // reopened session already holds, so its new prompt is written once and
+      // the old turns are not written again. A spawn starts from its prompt.
+      const transcriptAnchor = (session: AgentSession): number | undefined =>
+        reopenOptions ? session.messages.length : undefined;
 
       const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
       const askedModel = ((asked: string | undefined) => {
@@ -175,9 +220,11 @@ export function createAgentTool(deps: AgentToolDeps) {
         requestedModel: askedModel,
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
-        inheritContext,
+        // Neither is applied to a reopened conversation (runAgent, the
+        // manager), so neither is shown.
+        inheritContext: reopenOptions ? undefined : inheritContext,
         runInBackground,
-        isolation,
+        isolation: reopenOptions ? undefined : isolation,
       };
 
       const modeLabel = getPromptModeLabel(subagentType);
@@ -310,6 +357,10 @@ export function createAgentTool(deps: AgentToolDeps) {
         if (!record) {
           return textResult(`Failed to resume agent "${resumeId}".`);
         }
+        // A foreground resume settles inline, never through the completion
+        // callback, so persist its outcome here: get_subagent_result must find
+        // this run's result, not the earlier run's, once the live record is gone.
+        pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
         if (record.status === "error") {
           return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record, resumeState));
         }
@@ -322,7 +373,7 @@ export function createAgentTool(deps: AgentToolDeps) {
       const backgroundResult = (id: string, record: AgentRecord | undefined) => {
         const isQueued = record?.status === "queued";
         return textResult(
-          `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
+          `${fallbackNote}Agent ${isQueued ? "queued" : reopenOptions ? "resumed from its saved session" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
@@ -344,7 +395,7 @@ export function createAgentTool(deps: AgentToolDeps) {
           origBgOnSession(session);
           const rec = manager.getRecord(id);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session as any, rec.outputFile, id, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session as any, rec.outputFile, id, ctx.cwd, transcriptAnchor(session as AgentSession));
           }
         };
 
@@ -360,6 +411,7 @@ export function createAgentTool(deps: AgentToolDeps) {
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          ...reopenOptions,
           ...bgCallbacks,
         });
 
@@ -444,7 +496,7 @@ export function createAgentTool(deps: AgentToolDeps) {
         if (fgId) {
           const rec = manager.getRecord(fgId);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session as any, rec.outputFile, fgId, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session as any, rec.outputFile, fgId, ctx.cwd, transcriptAnchor(session as AgentSession));
           }
         }
       };
@@ -473,6 +525,7 @@ export function createAgentTool(deps: AgentToolDeps) {
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          ...reopenOptions,
           onQueued: (_id, ahead) => { queuedAhead = ahead; streamUpdate(); },
           ...fgCallbacks,
         }, (fgAgentId) => {

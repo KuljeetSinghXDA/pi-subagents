@@ -212,7 +212,10 @@ describe("issue #174: foreground agent that hits max_turns", () => {
 
     // Foreground results count as consumed the moment they're returned inline,
     // so clearCompleted(true)'s #108 preservation deliberately does not cover
-    // them. This is the ONLY path that makes a foreground id stop resolving.
+    // them. In a real session the saved `subagents:record` entry would still
+    // answer (see saved-record-retrieval.test.ts); this harness's `appendEntry`
+    // is a no-op, so here the live record is the only source and the switch is
+    // what makes the id stop resolving.
     await lifecycle.get("session_before_switch")?.();
 
     const read = await tools.get("get_subagent_result").execute("tc-read", { agent_id: id }, undefined, undefined, ctx());

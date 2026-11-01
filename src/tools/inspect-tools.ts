@@ -3,11 +3,12 @@ import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "../abortable.js";
 import { isTopLevelAgent } from "../agent-manager.js";
+import { findAgentRecordEntry, formatSavedAgentRecord } from "../agent-record-entry.js";
 import { getAgentConversation, SUBAGENT_TOOL_NAMES, steerAgent } from "../agent-runner.js";
 import { type CompletionOutbox, NOTIFICATION_HOLD_MS } from "../completion-outbox.js";
 import { formatLifetimeTokens, markdownText, textResult } from "../entry/renderers.js";
 import { formatAnswerSteer, getStatusNote, openQuestionsFooter, partialOutputSuffix } from "../status-note.js";
-import type { AgentRecord } from "../types.js";
+import type { AgentRecord, MentionResolution } from "../types.js";
 import { formatCost, formatDuration, getDisplayName } from "../ui/agent-widget.js";
 import { getLifetimeCost, getSessionContextPercent, type PendingUsagePool } from "../usage.js";
 
@@ -15,6 +16,8 @@ const QUEUE_WAIT_POLL_MS = Math.floor(NOTIFICATION_HOLD_MS / 4);
 
 export interface InspectToolsDeps {
   resolveAgentRef: (ref: string) => AgentRecord | undefined;
+  /** `@handle` resolution including tombstones, for the saved-record fallback. */
+  resolveMention: (name: string) => MentionResolution | undefined;
   isShowCostEnabled: () => boolean;
   outbox: CompletionOutbox;
   pi: ExtensionAPI;
@@ -46,7 +49,7 @@ export function registerToolReportingUsage(
 }
 
 export function createGetResultTool(deps: InspectToolsDeps) {
-  const { resolveAgentRef, isShowCostEnabled, outbox } = deps;
+  const { resolveAgentRef, resolveMention, isShowCostEnabled, outbox } = deps;
 
   return defineTool({
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
@@ -69,8 +72,19 @@ export function createGetResultTool(deps: InspectToolsDeps) {
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
+      if (!record) {
+        // Evicted, or lost to a reload: answer from the record the session saved.
+        // An evicted handle still resolves to its id through its tombstone.
+        const ref = params.agent_id.replace(/^@/, "");
+        const resolved = resolveMention(ref);
+        const saved = findAgentRecordEntry(ctx, resolved?.kind === "tombstone" ? resolved.entry.id : ref);
+        if (saved) {
+          outbox.cancel(saved.id);
+          return textResult(formatSavedAgentRecord(saved));
+        }
+      }
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }

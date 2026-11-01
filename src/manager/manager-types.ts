@@ -204,7 +204,17 @@ export interface SpawnOptions {
   description: string;
   name?: string;
   resumeSessionFile?: string;
-  reclaim?: { handle: string; alias?: string };
+  /**
+   * Internal capability, like `resumeSessionFile`: a forged handle would
+   * duplicate a live agent's name and make `resolveMention` ambiguous, so
+   * `spawnTopLevel` strips it from anything a caller sends.
+   *
+   * `id` keeps the evicted agent's id too, so the id the model already holds
+   * names the reopened conversation (`Agent({ resume })`, a workflow's
+   * `resume`). A name is taken back only while nothing else holds it — see
+   * `AgentManager.reclaimable`.
+   */
+  reclaim?: { id?: string; handle?: string; alias?: string };
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;

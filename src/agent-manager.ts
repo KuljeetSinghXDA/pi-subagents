@@ -151,16 +151,29 @@ export class AgentManager {
   ): string {
     assertValidSpawnCwd(options.cwd);
 
-    const id = randomUUID().slice(0, 17);
+    // A reclaimed id must not be live: the record would replace the one in the
+    // map, orphaning its run beyond the reach of stop and `abortAll()`.
+    // Callers reopen only what they found evicted; this keeps that true.
+    if (options.reclaim?.id !== undefined && this.registry.agents.has(options.reclaim.id)) {
+      throw new Error(`Agent ${options.reclaim.id} is still in memory, so it cannot be reopened from its saved session.`);
+    }
+    const id = options.reclaim?.id ?? randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
       type,
       handle: !isTopLevelAgent(options)
         ? undefined
-        : options.reclaim?.handle ?? assignHandle(handleBase(type), this.registry.takenHandles()),
+        // A reclaimed handle is taken back as-is while it is free: it belongs to
+        // the conversation this spawn is reopening, and re-deriving it would
+        // lose the numbering.
+        : this.reclaimable(options.reclaim?.handle, options.reclaim?.id)
+          ?? assignHandle(handleBase(type), this.registry.takenHandles()),
       description: options.description,
-      alias: isTopLevelAgent(options) ? options.reclaim?.alias : undefined,
+      // Reclaimed here, or filled in below from `name` — in which case it must
+      // see the handle this record just took, since both come out of the same
+      // namespace.
+      alias: isTopLevelAgent(options) ? this.reclaimable(options.reclaim?.alias, options.reclaim?.id) : undefined,
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
       startedAt: Date.now(),
@@ -175,6 +188,12 @@ export class AgentManager {
       workflowId: options.workflowId,
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
+      // A reopen continues this file until its session says otherwise (a fork
+      // gets its own, set at session creation). Seeded so a run that fails
+      // before it has a session still names the conversation in its saved
+      // record and tombstone: without it, the next resume would be refused as
+      // never saved.
+      sessionFile: options.resumeSessionFile,
       spawnPrompt: prompt,
     };
     this.registry.agents.set(id, record);
@@ -244,9 +263,17 @@ export class AgentManager {
     record.startGate = undefined;
     this.pool.acquireSlot(record);
 
-    const isolation = options.workflowId !== undefined
-      ? options.isolation
-      : getAgentConfig(type)?.isolation ?? options.isolation;
+    // mentions pass none, and RPC forwards only its caller's value. Workflow
+    // children are the exception, as in Claude Code, whose workflow agent()
+    // reads only the script's option and ignores the definition's.
+    // A reopen never gets a worktree, as in Claude Code: a fresh copy of HEAD
+    // would not hold the earlier run's edits, and a reopen whose old worktree
+    // held any is refused before it gets here (`reopenTarget`).
+    const isolation = options.resumeSessionFile !== undefined
+      ? undefined
+      : options.workflowId !== undefined
+        ? options.isolation
+        : getAgentConfig(type)?.isolation ?? options.isolation;
     let worktreeCwd: string | undefined;
     if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
@@ -502,6 +529,31 @@ export class AgentManager {
 
   getRecord(id: string): AgentRecord | undefined {
     return this.registry.agents.get(id);
+  }
+
+  /**
+   * `name`, if a reopened agent can take it back. Within one activation that is
+   * always so — tombstoned names are never allocated (`takenHandles`) — but a
+   * resume after a reload reopens from the session's saved record, with no
+   * tombstone holding the name, so a fresh agent may have taken it since. A
+   * name held by a live record, or by another agent's tombstone, stays with
+   * its holder and the reopened agent gets a fresh one.
+   *
+   * `id` is the agent being reopened, when it keeps its own: its tombstone is
+   * the one holding the name, legitimately. The `@handle` path keeps no id and
+   * reopens exactly the tombstone that holds the name, so it skips that check.
+   */
+  private reclaimable(name: string | undefined, id: string | undefined): string | undefined {
+    if (name === undefined) return undefined;
+    for (const record of this.registry.agents.values()) {
+      if (record.handle === name || record.alias === name) return undefined;
+    }
+    if (id !== undefined) {
+      for (const entry of this.registry.tombstones.values()) {
+        if (entry.id !== id && (entry.handle === name || entry.alias === name)) return undefined;
+      }
+    }
+    return name;
   }
 
   resolveMention(name: string): MentionResolution | undefined {

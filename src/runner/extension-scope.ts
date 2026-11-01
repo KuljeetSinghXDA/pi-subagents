@@ -172,6 +172,23 @@ export function scopeGateExtension(gate: NestedCallGate): InlineExtension {
   };
 }
 
+/** pi's MCP resource tools, which it counts as MCP tools alongside `mcp__<server>__<tool>`. */
+const MCP_RESOURCE_TOOL_NAMES = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+/** The tools that reach `codemode`/`deferred` MCP tools: neither is declared to the model. */
+const MCP_BRIDGE_TOOL_NAMES = new Set(["codemode", "tool_search"]);
+
+const isMcpToolName = (name: string) => name.startsWith("mcp__") || MCP_RESOURCE_TOOL_NAMES.has(name);
+
+/** Whether `name` matches one of the `tools:` `mcp__` entries: an exact name or a `*` pattern. */
+function matchesToolPattern(name: string, patterns: readonly string[]): boolean {
+  return patterns.some((p) =>
+    p.includes("*")
+      ? new RegExp(`^${p.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(name)
+      : p === name,
+  );
+}
+
 /**
  * Keep a subagent's tool scope correct as extensions register tools over time.
  */
@@ -183,11 +200,14 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
+    /** Bare `mcp__` entries from `tools:`; undefined leaves MCP tools to the rules above. */
+    mcpToolPatterns: string[] | undefined;
     readmitToolNames: Set<string>;
     nestedCallGate: NestedCallGate;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames, nestedCallGate } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, mcpToolPatterns, readmitToolNames, nestedCallGate } =
+    ctx;
 
   const inScope = (): Set<string> => {
     const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
@@ -202,12 +222,34 @@ export function installExtensionToolScope(
         keep.add(name);
       }
     }
+    // Bare `mcp__` entries, as in pi's `--tools`: only matching MCP tools stay, from
+    // whichever extension serves them (pi's MCP or an adapter), even one the `ext:`
+    // opt-in left out — and so do the bridges that reach them.
+    if (mcpToolPatterns) {
+      for (const name of keep) {
+        if (isMcpToolName(name) && !matchesToolPattern(name, mcpToolPatterns)) keep.delete(name);
+      }
+      for (const extension of loader.getExtensions().extensions) {
+        for (const name of extension.tools.keys()) {
+          if (disallowedSet?.has(name)) continue;
+          if (MCP_BRIDGE_TOOL_NAMES.has(name) || matchesToolPattern(name, mcpToolPatterns)) keep.add(name);
+        }
+      }
+    }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
     for (const name of readmitToolNames) keep.add(name);
     return keep;
   };
 
-  const named = new Set([...toolNames, ...readmitToolNames, ...[...narrowing.values()].flatMap((s) => [...s])]);
+  // Names this agent selects explicitly: its built-ins, injected tools, `ext:foo/bar`
+  // narrowings and exact `mcp__` entries. pi activates a named tool even when it is
+  // `defaultActive: false`, as `--tools` does.
+  const named = new Set([
+    ...toolNames,
+    ...readmitToolNames,
+    ...[...narrowing.values()].flatMap((s) => [...s]),
+    ...(mcpToolPatterns ?? []).filter((p) => !p.includes("*")),
+  ]);
 
   const renarrow = () => {
     const allowed = inScope();

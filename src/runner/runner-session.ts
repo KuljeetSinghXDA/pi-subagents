@@ -30,7 +30,7 @@ import {
   createNestedSubagentTools,
   getMaxSubagentDepth,
 } from "../nested-tools.js";
-import { buildAgentPrompt, type PromptExtras } from "../prompts.js";
+import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "../prompts.js";
 import { continueSessionBare } from "../session-continue.js";
 import { preloadSkills } from "../skill-loader.js";
 import {
@@ -68,6 +68,26 @@ import {
   type RunResult,
 } from "./runner-types.js";
 
+/**
+ * Open an agent's saved session to continue it — or a copy of it, when the
+ * session belongs to another parent.
+ *
+ * pi's `/fork` and `/clone` copy the parent's entries, saved agent records
+ * included, so two parent sessions can each resume the same agent. Appending
+ * both continuations to one file would interleave two histories in it. The
+ * child's header names the parent that spawned it; a resume from any other
+ * parent forks the child alongside, exactly as pi forked the parent, and the
+ * copy is that parent's from then on. A header with no parent (a child
+ * spawned from a context without a session file) gives nothing to compare,
+ * so it opens in place as before.
+ */
+function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
+  const opened = SessionManager.open(file, sessionDir);
+  const owner = opened.getHeader()?.parentSession;
+  if (owner === undefined || owner === parentSessionFile) return opened;
+  return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -85,7 +105,9 @@ export async function runAgent(
 
   const env = await detectEnv(options.pi, effectiveCwd);
 
-  const parentSystemPrompt = ctx.getSystemPrompt();
+  // Get parent system prompt for append-mode agents, without the sections the
+  // child session renders itself (skills, cwd, extension sections).
+  const parentSystemPrompt = inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd);
 
   const extras: PromptExtras = {};
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
@@ -137,6 +159,7 @@ export async function runAgent(
   const { extNames, narrowing } = parseExtSelectors(
     isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
+  const mcpToolPatterns = agentConfig?.mcpToolPatterns;
   const noExtensions = extensions === false;
 
   const extensionsSpec = Array.isArray(extensions)
@@ -250,6 +273,13 @@ export async function runAgent(
       }
     }
   }
+  // MCP tools come from extensions, so with none loaded these entries cannot match.
+  if (mcpToolPatterns && noExtensions) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `tools-error:${mcpToolPatterns.join(", ")} requested by agent "${type}" need extensions, but it loads none`,
+    });
+  }
 
   let model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
@@ -319,6 +349,46 @@ export async function runAgent(
 
   const builtinToolNameSet = new Set(toolNames);
 
+  // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing: with
+  // no tool it can only narrate calls it cannot make. Extension tools register after
+  // spawn (MCP once its servers connect), so they count as possible whenever an
+  // extension they could come from loaded, or any `mcp__` entry can reach a bridge.
+  //
+  // A resume reopens an existing conversation: the config may have changed since
+  // its first run, and refusing then would strand every revive path (`/agents`,
+  // pause-continue, `Agent({resume})`) without the session it was asked to reopen.
+  if (options.resumeSessionFile === undefined) {
+    const loadedNames = new Set(
+      loader
+        .getExtensions()
+        .extensions.filter((e) => e.path !== `<inline:${SCOPE_GATE_NAME}>`)
+        .flatMap((e) => extensionCanonicalNames(e.path)),
+    );
+    const unrecognized = agentConfig?.builtinToolNames?.filter((n) => !BUILTIN_TOOL_NAMES.includes(n)) ?? [];
+    const unmatched = [...extNames].filter((n) => !loadedNames.has(n));
+    // `extensions: false` and `isolated` load nothing, so `loadedNames` is empty then.
+    const extensionToolsPossible =
+      loadedNames.size > 0 &&
+      (extNames.size === 0 || unmatched.length < extNames.size || !!mcpToolPatterns);
+    if (
+      (unrecognized.length > 0 || unmatched.length > 0) &&
+      toolNames.every((n) => !BUILTIN_TOOL_NAMES.includes(n) || disallowedSet?.has(n)) &&
+      readmitToolNames.size === 0 &&
+      !extensionToolsPossible
+    ) {
+      const reasons = [
+        unrecognized.length > 0 ? `unrecognized [${unrecognized.join(", ")}]` : "",
+        unmatched.length > 0
+          ? `recognized but matched no tools in this session [${unmatched.map((n) => `ext:${n}`).join(", ")}]`
+          : "",
+      ].filter(Boolean);
+      throw new Error(
+        `Agent '${type}' would be spawned with zero tools — refusing. Its tools list resolved to nothing: ` +
+          `${reasons.join("; ")}. Fix the agent's tools frontmatter or pass a different subagent_type.`,
+      );
+    }
+  }
+
   let sessionTools: string[] | undefined;
   let sessionExcludeTools: string[] | undefined;
   if (noExtensions) {
@@ -347,11 +417,15 @@ export async function runAgent(
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : getRememberAgents());
+  const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const sessionManager = options.resumeSessionFile
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    // Reopening an existing conversation: the file already carries its own
+    // header (cwd, parent) and history, so none of the create-time options
+    // apply. `sessionDir` still matters for a later /new or /branch off it.
+    ? reopenSession(options.resumeSessionFile, parentSessionFile, configuredSessionDir ?? defaultSessionDir)
     : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
+          parentSession: parentSessionFile,
         })
       : SessionManager.inMemory(effectiveCwd);
 
@@ -401,6 +475,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
+      mcpToolPatterns: isolated ? undefined : mcpToolPatterns,
       readmitToolNames,
       nestedCallGate,
     });
@@ -420,7 +495,9 @@ export async function runAgent(
       await continueSessionBare(session, { signal: options.signal });
     } else {
       let effectivePrompt = prompt;
-      if (options.inheritContext) {
+      // Parent context only for a fresh conversation — a reopened one already
+      // holds its history, and a live resume never re-sends the parent's either.
+      if (options.inheritContext && !options.resumeSessionFile) {
         const parentContext = buildParentContext(ctx);
         if (parentContext) {
           effectivePrompt = parentContext + prompt;

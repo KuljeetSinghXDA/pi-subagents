@@ -63,6 +63,20 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
     pauseDeps,
   } = deps;
 
+  // Start a mentioned agent the direct way. runAgent resolves model, thinking,
+  // max turns and `isolated` from the agent's own config when the spawn omits
+  // them, but not `inherit_context`: an RPC caller decides that one itself. A
+  // mention is the user starting the agent from this session, so the file does —
+  // reloaded first, as the spawn reloads it, so a mid-session edit is not missed.
+  const startMentioned = (ctx: ExtensionContext, type: string, message: string) => {
+    pauseDeps.reloadCustomAgents();
+    return spawnTopLevel(pi, ctx, type, message, {
+      description: describeMention(message),
+      isBackground: true,
+      inheritContext: getAgentConfig(type)?.inheritContext,
+    });
+  };
+
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
 
@@ -123,10 +137,7 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
         .then(async (result) => {
           if (result.spawned) return;
           try {
-            const id = spawnTopLevel(pi, ctx, type, mention.message, {
-              description: describeMention(mention.message),
-              isBackground: true,
-            });
+            const id = startMentioned(ctx, type, mention.message);
             await manager.awaitStartup(id);
             ctx.ui.notify(`Started ${label} directly — ${result.error}`, "warning");
           } catch (err) {
@@ -140,10 +151,10 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
     }
 
     try {
-      const id = spawnTopLevel(pi, ctx, type, mention.message, {
-        description: describeMention(mention.message),
-        isBackground: true,
-      });
+      // The manager's onStart/onComplete callbacks own the widget, the fleet list
+      // and the completion notification — the same contract the scheduler and
+      // cross-extension RPC spawns run under.
+      const id = startMentioned(ctx, type, mention.message);
       await manager.awaitStartup(id);
       ctx.ui.notify(`Started @${handleBase(type)}`, "info");
     } catch (err) {

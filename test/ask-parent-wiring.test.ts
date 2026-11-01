@@ -59,7 +59,10 @@ vi.mock("../src/custom-agents.js", () => ({ loadCustomAgents: vi.fn(() => []) })
 vi.mock("../src/env.js", () => ({
   detectEnv: vi.fn(async () => ({ isGitRepo: false, branch: "", platform: "linux" })),
 }));
-vi.mock("../src/prompts.js", () => ({ buildAgentPrompt: vi.fn(() => "system prompt") }));
+vi.mock("../src/prompts.js", () => ({
+  buildAgentPrompt: vi.fn(() => "system prompt"),
+  inheritableParentPrompt: vi.fn((rendered: string) => rendered),
+}));
 vi.mock("../src/memory.js", () => ({
   buildMemoryBlock: vi.fn(() => ""),
   buildReadOnlyMemoryBlock: vi.fn(() => ""),

@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -10,6 +9,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { reopenTarget } from "../agent-record-entry.js";
 import { getDefaultMaxTurns, normalizeMaxTurns } from "../agent-runner.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
 import { runInChildSessionContext } from "../child-context.js";
@@ -587,21 +587,19 @@ export async function reviveTombstone(
   const { manager, reloadCustomAgents, spawnResolved } = deps;
   const target = `@${entry.alias ?? entry.handle}`;
 
-  if (!existsSync(entry.sessionFile)) {
-    manager.dropTombstone(entry.handle);
-    ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
-    return false;
-  }
-
   reloadCustomAgents();
-  const dispatch = resolveSpawnType(entry.type);
-  if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
-    ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
+  const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);
+  if (!reopen.ok) {
+    // A session that is gone can only ever fail, so its row goes with it; an
+    // unavailable agent stays, since re-enabling it makes the handle work
+    // again.
+    if (reopen.gone) manager.dropTombstone(entry.handle);
+    ctx.ui.notify(`Could not resume ${target} — ${reopen.reason}.`, "warning");
     return false;
   }
 
   try {
-    const id = spawnResolved(deps.pi, ctx, dispatch.type, prompt, {
+    const id = spawnResolved(deps.pi, ctx, reopen.type, prompt, {
       description: entry.description,
       reclaim: { handle: entry.handle, alias: entry.alias },
       resumeSessionFile: entry.sessionFile,

@@ -2,6 +2,7 @@
  * agent-registry.ts — Agent record storage, tombstone persistence, and handle resolution.
  */
 
+import { worktreeLost } from "../agent-record-entry.js";
 import type { AgentRecord, AgentTombstone, MentionResolution } from "../types.js";
 import { MAX_TOMBSTONES } from "./manager-types.js";
 
@@ -70,6 +71,7 @@ export class AgentRegistry {
       description: record.description,
       sessionFile: record.sessionFile,
       completedAt: record.completedAt ?? Date.now(),
+      worktreeLost: worktreeLost(record) || undefined,
     });
     while (this.tombstones.size > MAX_TOMBSTONES) {
       const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));

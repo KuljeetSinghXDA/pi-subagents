@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData } from "../agent-record-entry.js";
 import { syncPauseManifest } from "../commands/pause-continue.js";
 import type { ParkGateController } from "../commands/pause-state.js";
 import type { CompletionOutbox } from "../completion-outbox.js";
@@ -135,11 +136,7 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
     if (currentCtx) syncPauseManifest(currentCtx, park, manager);
 
     if (record.status === "paused") {
-      pi.appendEntry("subagents:record", {
-        id: record.id, type: record.type, description: record.description,
-        status: record.status, result: record.result, error: record.error,
-        startedAt: record.startedAt, completedAt: record.completedAt,
-      });
+      pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
       agentActivity.delete(record.id);
       widget.update();
       fleet.update();
@@ -154,11 +151,9 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
       pi.events.emit("subagents:completed", eventData);
     }
 
-    pi.appendEntry("subagents:record", {
-      id: record.id, type: record.type, description: record.description,
-      status: record.status, result: record.result, error: record.error,
-      startedAt: record.startedAt, completedAt: record.completedAt,
-    });
+    // Persist the final record: get_subagent_result answers from it once the
+    // live record is gone, and other extensions reconstruct history from it.
+    pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
 
     if (record.resultConsumed) {
       agentActivity.delete(record.id);
