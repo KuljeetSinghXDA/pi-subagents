@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+- **A package's name alias covers directory-style `pi.extensions` declarations** (ported from [tintinweb/pi-subagents#426](https://github.com/tintinweb/pi-subagents/pull/426) — thanks [@LuLuyu](https://github.com/LuLuyu)). A declaration such as `"./dist"` only produced the package alias when the loader registered exactly that directory; loaded from a file inside it — `extensions: ["…/dist/index.js"]`, a symlink to that file, or pi resolving the directory to its index — `extensions: [pkg-name]` and `ext: pkg-name` matched nothing, leaving only the path-derived name. Every file under a declared directory now answers to the package alias too; path-derived names keep working, and the separator in the prefix test keeps `dist-v2` from matching `"./dist"`.
+
 ## [2026.11.011] - 2026-11-01
 
 ### Added

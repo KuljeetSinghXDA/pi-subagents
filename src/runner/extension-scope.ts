@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -32,8 +32,9 @@ export function extensionCanonicalName(extPath: string): string {
 
 /**
  * The unscoped, lowercased npm short name of the pi package that DECLARES
- * `extPath` as an extension entry — or undefined if the entry doesn't belong to
- * such a package.
+ * `extPath` as an extension entry — as that file, or as a directory containing
+ * it (`"./dist"` can be loaded from `dist/index.js`) — or undefined if the
+ * entry doesn't belong to such a package.
  */
 function extensionPackageName(extPath: string): string | undefined {
   // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
@@ -57,7 +58,15 @@ function extensionPackageName(extPath: string): string | undefined {
     if (
       typeof pkg.name === "string" &&
       Array.isArray(entries) &&
-      entries.some((e) => typeof e === "string" && resolve(dir, e) === entry)
+      entries.some((e) => {
+        if (typeof e !== "string") return false;
+        // A declaration may name a directory (`"./dist"`) that the entry lives
+        // under, so an entry belongs to this package when it equals the
+        // declaration or sits beneath it. The `${sep}` boundary keeps that
+        // prefix test platform-correct (`dist-v2` never matches `"./dist"`).
+        const declared = resolve(dir, e);
+        return declared === entry || entry.startsWith(`${declared}${sep}`);
+      })
     ) {
       const short = pkg.name.startsWith("@") ? pkg.name.slice(pkg.name.indexOf("/") + 1) : pkg.name;
       return short.toLowerCase();
