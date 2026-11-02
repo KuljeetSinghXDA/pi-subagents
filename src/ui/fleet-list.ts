@@ -91,6 +91,37 @@ function rightAlign(left: string, right: string, width: number): string {
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
 }
 
+export const SHARED_FLEET_COORDINATOR_KEY = Symbol.for("pi-subagents:fleet-coordinator");
+export const SHARED_DOCK_COORDINATOR_KEY = Symbol.for("pi-bash:dock-coordinator");
+
+function formatFleetSectionHeader(
+  title: string,
+  width: number,
+  theme: Theme,
+  hint?: string,
+): string {
+  const prefix = "── ";
+  const suffix = " ";
+  const prefixW = visibleWidth(prefix);
+  const titleW = visibleWidth(title);
+  const suffixW = visibleWidth(suffix);
+
+  if (hint && width > 50) {
+    const hintText = ` ${hint} `;
+    const hintW = visibleWidth(hintText);
+    const midRuleLen = Math.max(1, width - prefixW - titleW - suffixW - hintW);
+    const midRule = "─".repeat(midRuleLen);
+    const titleStr = theme.fg("toolTitle" as any, title);
+    const hintStr = theme.fg("dim", hintText);
+    return truncateToWidth(`${theme.fg("dim", prefix)}${titleStr}${theme.fg("dim", suffix + midRule)}${hintStr}`, width);
+  }
+
+  const ruleLen = Math.max(0, width - prefixW - titleW - suffixW);
+  const rule = "─".repeat(ruleLen);
+  const titleStr = theme.fg("toolTitle" as any, title);
+  return truncateToWidth(`${theme.fg("dim", prefix)}${titleStr}${theme.fg("dim", suffix + rule)}`, width);
+}
+
 export class FleetList {
   private ui: FleetUICtx | undefined;
   private tui: any | undefined;
@@ -180,6 +211,23 @@ export class FleetList {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.inputUnsub = ui.onTerminalInput(data => this.handleKey(data));
+
+    (globalThis as any)[SHARED_FLEET_COORDINATOR_KEY] = {
+      isActive: () => this.active,
+      hasRows: () => this.hasRows(),
+      activate: (fromTop = true) => {
+        this.dismissed = false;
+        this.active = true;
+        this.selectedIndex = fromTop ? 0 : Math.max(0, this.roster().length - 1);
+        this.update();
+      },
+      deactivate: () => {
+        this.deactivate();
+      },
+      update: () => {
+        this.update();
+      },
+    };
   }
 
   /** Ensure the re-render timer is running (called when an agent spawns). */
@@ -196,6 +244,7 @@ export class FleetList {
   }
 
   dispose(): void {
+    delete (globalThis as any)[SHARED_FLEET_COORDINATOR_KEY];
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
@@ -244,6 +293,17 @@ export class FleetList {
 
     this.clampSelection();
     this.ensureTimer(); // keep stats ticking whenever the list is shown (e.g. after a re-enable)
+
+    const dockCoordinator = (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    const dockExpanded = !!(dockCoordinator?.isDetail?.() || dockCoordinator?.isExpanded?.());
+    if (dockExpanded) {
+      if (this.widgetRegistered) {
+        this.ui.setWidget(FLEET_KEY, undefined);
+        this.widgetRegistered = false;
+        this.tui = undefined;
+      }
+      return;
+    }
 
     if (this.dismissed || this.hubOpen) {
       // The user closed the bar with →, or the hub overlay is up. Stay hidden
@@ -404,6 +464,14 @@ export class FleetList {
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
     if (isKeyRelease(data)) return undefined;
+
+    const dockCoordinator = (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    const isDockActive = !!(dockCoordinator && (dockCoordinator.inDock?.() || dockCoordinator.isDetail?.() || dockCoordinator.isExpanded?.()));
+    if (isDockActive) {
+      if (this.active) this.deactivate();
+      return undefined;
+    }
+
     // While an overlay is open, let it own all input. Checked before the focus
     // test below, which would otherwise read the hub holding the keyboard as
     // "the user left the list" and reset the selection out from under it.
@@ -421,10 +489,21 @@ export class FleetList {
       return undefined;
     }
 
+    const hasBgTasks = !!dockCoordinator?.hasTasks?.();
+
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list — and
       // recalls a bar dismissed with →, so the closing key's mirror reopens it.
-      const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
+      const isDown = matchesKey(data, "down");
+      const isLeft = matchesKey(data, "left");
+
+      // When background tasks exist above the fleet, ↓ at prompt belongs to the Tasks Dock.
+      // ← remains the direct activator for subagents fleet.
+      if (isDown && hasBgTasks) {
+        return undefined;
+      }
+
+      const isActivator = isDown || isLeft;
       // Gated on the roster, not the agents: a session whose only row is a
       // workflow run still has somewhere to go, and requiring an agent would
       // render the row but refuse to move into it.
@@ -442,6 +521,13 @@ export class FleetList {
     }
 
     // Active — arrows navigate, Enter opens, → / Esc / Up-past-top leave the list.
+    const isTab = matchesKey(data, Key.tab) || data === "\t";
+    if (isTab && hasBgTasks && dockCoordinator?.enterDock) {
+      this.deactivate();
+      dockCoordinator.enterDock(false);
+      return { consume: true };
+    }
+
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
@@ -449,7 +535,13 @@ export class FleetList {
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
-      if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
+      if (this.selectedIndex === 0) {
+        this.deactivate();
+        if (hasBgTasks && dockCoordinator?.enterDock) {
+          dockCoordinator.enterDock(true);
+        }
+        return { consume: true };
+      }
       this.selectedIndex -= 1;
       this.update();
       return { consume: true };
@@ -626,13 +718,29 @@ export class FleetList {
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
 
-    const hint = this.active
-      ? "↑↓ select · enter view · → close · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+    const dockCoordinator = (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    const hasBgTasks = !!dockCoordinator?.hasTasks?.();
+
+    let hint: string;
+    if (this.active) {
+      hint = hasBgTasks
+        ? "↑↓ select · enter view · tab tasks · esc prompt"
+        : "↑↓ select · enter view · → close · esc back";
+    } else {
+      hint = hasBgTasks
+        ? "tab fleet · ← for agents · enter dock (↓)"
+        : "esc to interrupt · ← for agents · ↓ to manage";
+    }
+
     const lines: string[] = [];
-    lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
-    lines.push("");
-    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
+    if (hasBgTasks) {
+      lines.push(formatFleetSectionHeader("Subagents Fleet", width, theme, hint));
+    } else {
+      lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
+      lines.push("");
+    }
+
+    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme, hasBgTasks)} main`, width));
 
     // Window the rows so the selected one stays visible.
     const visible = Math.min(MAX_AGENT_ROWS, rows.length);
@@ -645,8 +753,8 @@ export class FleetList {
       const row = rows[a];
       lines.push(
         row.kind === "workflow" ?
-          this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
-        : this.renderAgentRow(a + 1, sel, row.record, width, theme),
+          this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme, hasBgTasks)
+        : this.renderAgentRow(a + 1, sel, row.record, width, theme, hasBgTasks),
       );
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
@@ -656,7 +764,10 @@ export class FleetList {
     return lines;
   }
 
-  private bullet(rosterIndex: number, sel: number, theme: Theme): string {
+  private bullet(rosterIndex: number, sel: number, theme: Theme, hasBgTasks = false): string {
+    if (hasBgTasks && !this.active) {
+      return theme.fg("dim", "○");
+    }
     return rosterIndex === sel ? theme.fg("accent", "●") : theme.fg("dim", "○");
   }
 
@@ -671,11 +782,12 @@ export class FleetList {
     workflow: FleetWorkflow,
     width: number,
     theme: Theme,
+    hasBgTasks = false,
   ): string {
-    const selected = rosterIndex === sel;
+    const selected = this.active ? rosterIndex === sel : (!hasBgTasks && rosterIndex === sel);
     const kind = theme.fg(selected ? "text" : "muted", "workflow");
     const name = selected ? theme.fg("text", workflow.name) : workflow.name;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${kind}  ${name}`;
+    const left = `  ${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
@@ -683,17 +795,24 @@ export class FleetList {
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 
-  private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
+  private renderAgentRow(
+    rosterIndex: number,
+    sel: number,
+    record: AgentRecord,
+    width: number,
+    theme: Theme,
+    hasBgTasks = false,
+  ): string {
     // The selected row renders in the theme's primary text color so it reads as
     // one selection (#230). A configured badge survives — Claude Code's FleetView
     // keeps the agent color on the selected row too and only bolds it — which also
     // keeps the row's width fixed as the selection moves.
-    const selected = rosterIndex === sel;
+    const selected = this.active ? rosterIndex === sel : (!hasBgTasks && rosterIndex === sel);
     const name = renderAgentRecordName(record, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    const left = `  ${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${name}  ${description}`;
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.

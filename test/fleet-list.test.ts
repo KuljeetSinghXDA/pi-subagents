@@ -11,6 +11,8 @@ import {
   type FleetWorkflow,
   formatFleetElapsed,
   formatFleetTokens,
+  SHARED_DOCK_COORDINATOR_KEY,
+  SHARED_FLEET_COORDINATOR_KEY,
 } from "../src/ui/fleet-list.js";
 import type { WorkflowDialogSource } from "../src/ui/workflow-view.js";
 
@@ -1148,5 +1150,143 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ status: "completed", startedAt: completedAt - 12_000, completedAt })]);
 
     expect(h.render().map(plain).join("\n")).toContain("12s");
+  });
+});
+
+describe("FleetList dock coordination (pi-bash-process-priority)", () => {
+  const TAB = "\t";
+
+  it("publishes fleet coordinator on globalThis and cleans up on dispose", () => {
+    const h = harness([makeRecord({ description: "task 1" })]);
+    const coordinator = (globalThis as any)[SHARED_FLEET_COORDINATOR_KEY];
+    expect(coordinator).toBeDefined();
+    expect(coordinator.hasRows()).toBe(true);
+    expect(coordinator.isActive()).toBe(false);
+
+    coordinator.activate(false);
+    expect(coordinator.isActive()).toBe(true);
+
+    coordinator.deactivate();
+    expect(coordinator.isActive()).toBe(false);
+
+    h.fleet.dispose();
+    expect((globalThis as any)[SHARED_FLEET_COORDINATOR_KEY]).toBeUndefined();
+  });
+
+  it("yields all input when dock is active", () => {
+    const h = harness([makeRecord({ description: "task 1" })]);
+    (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+      inDock: () => true,
+      hasTasks: () => true,
+    };
+    try {
+      expect(h.press(DOWN)).toBeUndefined();
+      expect(h.press(LEFT)).toBeUndefined();
+    } finally {
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    }
+  });
+
+  it("leaves DOWN to dock at prompt when background tasks exist, but LEFT still activates fleet", () => {
+    const h = harness([makeRecord({ description: "task 1" })]);
+    (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+      inDock: () => false,
+      hasTasks: () => true,
+    };
+    try {
+      // DOWN is not consumed (passes through to dock)
+      expect(h.press(DOWN)).toBeUndefined();
+
+      // LEFT directly activates fleet
+      expect(h.press(LEFT)).toEqual({ consume: true });
+    } finally {
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    }
+  });
+
+  it("Tab switches from fleet to dock, and Up at top enters dock from bottom", () => {
+    const h = harness([makeRecord({ description: "task 1" })]);
+    const enterDock = vi.fn(() => true);
+    (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+      inDock: () => false,
+      hasTasks: () => true,
+      enterDock,
+    };
+    try {
+      // Activate fleet via LEFT
+      h.press(LEFT);
+      const coordinator = (globalThis as any)[SHARED_FLEET_COORDINATOR_KEY];
+      expect(coordinator.isActive()).toBe(true);
+
+      // Tab switches to dock
+      expect(h.press(TAB)).toEqual({ consume: true });
+      expect(coordinator.isActive()).toBe(false);
+      expect(enterDock).toHaveBeenCalledWith(false);
+
+      // Re-activate fleet
+      coordinator.activate(true);
+      expect(coordinator.isActive()).toBe(true);
+
+      // Up from top row (main) deactivates fleet and enters dock from bottom
+      expect(h.press(UP)).toEqual({ consume: true });
+      expect(coordinator.isActive()).toBe(false);
+      expect(enterDock).toHaveBeenCalledWith(true);
+    } finally {
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    }
+  });
+
+  it("temporarily unregisters widget when dock is expanded or in detail", () => {
+    let expanded = false;
+    (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+      isExpanded: () => expanded,
+      isDetail: () => false,
+      hasTasks: () => true,
+    };
+    try {
+      const h = harness([makeRecord({ description: "task 1" })]);
+      expect(h.render().length).toBeGreaterThan(0);
+
+      // Dock expands
+      expanded = true;
+      h.fleet.update();
+      expect(h.render().length).toBe(0);
+
+      // Dock collapses
+      expanded = false;
+      h.fleet.update();
+      expect(h.render().length).toBeGreaterThan(0);
+    } finally {
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    }
+  });
+
+  it("renders Subagents Fleet section header and dimmed markers when background tasks exist", () => {
+    (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+      inDock: () => true,
+      hasTasks: () => true,
+    };
+    try {
+      const h = harness([makeRecord({ description: "agent 1" })]);
+      const lines = h.render(80);
+      expect(lines.some(l => l.includes("Subagents Fleet"))).toBe(true);
+      // Inactive: main marker is dimmed ○, not bright ●
+      const mainLine = lines.find(l => l.includes("main"))!;
+      expect(mainLine).toContain("○");
+      expect(mainLine).not.toContain("●");
+
+      // Now activate fleet
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+      (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY] = {
+        inDock: () => false,
+        hasTasks: () => true,
+      };
+      h.press(LEFT);
+      const activeLines = h.render(80);
+      const activeMain = activeLines.find(l => l.includes("main"))!;
+      expect(activeMain).toContain("●");
+    } finally {
+      delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
+    }
   });
 });
