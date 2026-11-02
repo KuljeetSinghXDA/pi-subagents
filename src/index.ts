@@ -286,6 +286,7 @@ export default function (pi: ExtensionAPI) {
     revivePausedEntry: (ctx: ExtensionContext, entry: any) => continuePausedEntry(ctx, entry, pauseDeps),
     relaunchPausedWorkflow: (ctx: ExtensionContext, entry: any) =>
       pauseDeps.relaunchWorkflow ? pauseDeps.relaunchWorkflow(ctx, entry) : Promise.resolve(false),
+    manager,
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
