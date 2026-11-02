@@ -1,6 +1,6 @@
 name: Publish
 
-# Releases are calendar-versioned tags (v2026.10.18-r4). Pushing the tag is the
+# Releases are calendar-versioned tags (v2026.10.184). Pushing the tag is the
 # publish trigger; prepublishOnly (lint + typecheck + test + build) gates it.
 on:
   push:

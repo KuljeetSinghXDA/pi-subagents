@@ -3,13 +3,13 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Versions are calendar-based: `YYYY.MM.DD-r<n>`, where `r<n>` is the release
+Versions are calendar-based: `YYYY.MM.DD<n>`, where DD is 2 digits and `<n>` is the release
 number for that date. No Semantic Versioning compatibility promises are made —
 check the entries below for behaviour changes.
 
 ## [Unreleased]
 
-## [2026.11.01-r1] - 2026-11-01
+## [2026.11.011] - 2026-11-01
 
 ### Added
 - **An agent stays resumable after its record is evicted or lost to a reload** (ported from [tintinweb/pi-subagents#420](https://github.com/tintinweb/pi-subagents/pull/420), fixes [#331](https://github.com/tintinweb/pi-subagents/issues/331), [#385](https://github.com/tintinweb/pi-subagents/issues/385)). `Agent({ resume })` and a workflow's `agent({ resume })` failed once an agent had been finished for ten minutes, or after a reload or restart, although its session was still on disk. Both now reopen the saved session under the same id, running under the agent type's current definition; a child resumed from a `/fork` or `/clone` of the parent is forked rather than appended to the shared file. As in Claude Code, a reopen never gets a worktree: an agent whose worktree held changes is refused with the reason (its work is on the branch named in its result), and one whose worktree was clean continues in the main checkout — previously an `@handle` reopen built a fresh worktree from HEAD that lacked the earlier edits. A record whose id is still in memory is never reclaimed, and a reopened row no longer shows `inherit_context`/worktree tags that were not applied.
@@ -25,7 +25,7 @@ check the entries below for behaviour changes.
 - **Append-mode subagents no longer list the parent's skills and cwd a second time** (ported from [tintinweb/pi-subagents#400](https://github.com/tintinweb/pi-subagents/pull/400), fixes [#399](https://github.com/tintinweb/pi-subagents/issues/399)). An append-mode agent such as `general-purpose` inherited the parent's whole rendered prompt, including its `<skills>`, `<cwd>` and extension sections, and then its own session rendered them again — so skills appeared twice, the parent's skills reached agents set to `skills: false` or a preload list, and the inherited text depended on turn timing. The child now inherits the parent's prompt up to its skills section; the preamble and project context still carry over once. `mention-clone` keeps the full prompt by design.
 - **The `Agent` tool no longer suggests `Explore` when it cannot be spawned** (ported from [tintinweb/pi-subagents#330](https://github.com/tintinweb/pi-subagents/pull/330), fixes [#330](https://github.com/tintinweb/pi-subagents/issues/330)). With `disableDefaultAgents: true`, or an `Explore.md` that sets `enabled: false`, the exploration guideline pointed at an agent that does not resolve. It names Explore only when Explore is available, as in Claude Code.
 
-## [2026.10.26-r1] - 2026-10-26
+## [2026.10.261] - 2026-10-26
 
 ### Added
 - **Nested agents can ask their parent for clarification instead of guessing.** Every non-isolated subagent — at any depth, with or without a delegation allowlist — gets `ask_parent`: the question — with the assumption the child will proceed on — is delivered to the nearest ancestor that can actually take a turn (blocked ancestors are skipped; the chain ends at the main session, which answers via the new `answer_subagent` tool), the child keeps working, and the answer arrives mid-run as a steering message. Unanswered questions ride the result as a footer; errors and aborts drop them rather than dangling. Replaces the post-hoc prose protocol of [tintinweb/pi-subagents#410](https://github.com/tintinweb/pi-subagents/pull/410), whose resume instruction was injected exactly where no resume path existed; design notes in `docs/a2a-questions.md`.
@@ -42,13 +42,13 @@ check the entries below for behaviour changes.
 - **The run page's agent list reaches its bottom when a run has more agents than fit.** The hub's **W** pane windowed its agent list in *entries* while `padLines` clips *rows*, and a live agent spends two rows — its `↳` tail is never empty while running — so a long list drew the top and silently cut the bottom, cursor row included, with no key or wheel way to bring it in. The pane now windows in whole rendered rows (shared `agentEntryWindow` in `workflow-view.ts`), always keeps the cursor's rows visible, follows the tail while the cursor sits on a phase instead of pinning to the first agent, and caps the phase block at a third of the body so agents are no longer starved to a row or two. `PgUp`/`PgDn` stride the item cursor and `Home`/`End` jump to the ends; the mouse wheel keeps scrolling the roster pinned left of the run page, as before.
 - **Collapsed completion notifications preview JSON results as one compact line instead of a bare `{`.** A workflow or background agent whose result is an object gets pretty-printed with `JSON.stringify(…, null, 2)`, so the collapsed card's first-line preview showed only the opening brace. When the first preview line is a bare `{` or `[`, the card now collapses the whitespace into a single capped line instead; plain-text results, the expanded view and the model-facing notification text are unchanged.
 
-## [2026.10.22-r1] - 2026-10-22
+## [2026.10.221] - 2026-10-22
 
 ### Fixed
 - **Clean shutdown releases parked main turn claim and shadow continuation inherits active model.** When quitting after a main turn parked, `session_shutdown` skipped clearing the PID claim if the park had already landed, causing subsequent `/continue` invocations in new or restarted processes to falsely reject with a live claim collision warning. The shutdown handler now always releases the PID claim for the shutting-down process, shadow continuation passes `model`, `thinkingLevel`, and `scopedModels` from the active command context, and already-complete turns notify clearly instead of failing or reporting misleading continuations.
 - **Main turn park lands active workflows at boundaries and preserves them through shutdown.** When `/pause` was armed during a running turn, `landPark` paused active agents but omitted active `workflowTasks`, causing running workflows to remain in `running` status and be excluded from the manifest rewrite. `landPark` now pauses active workflow tasks via `pauseWorkflowTask` before syncing the manifest, reports parked workflow counts in the notification, and `session_shutdown` lands any armed pause before clearing `workflowTasks`.
 
-## [2026.10.18-r4] - 2026-10-18
+## [2026.10.184] - 2026-10-18
 
 ### Added
 - **Publishing to npm is automated: pushing a `v*` release tag runs the new `Publish` workflow**, which refuses a tag whose version does not match `package.json`, then publishes with provenance through the `prepublishOnly` gate (lint, typecheck, tests, build). Authenticates via npm Trusted Publishing (OIDC) — no token secret in the repository. Tagging itself stays manual.
@@ -56,23 +56,23 @@ check the entries below for behaviour changes.
 ### Fixed
 - **Subagent activity subtext shows in-flight and completed tool calls instead of freezing on initial narration.** When an agent streamed conversational text on its first turn, subsequent turns without preamble left the subtext stuck on the opening sentence because `responseText` was never cleared and took precedence over tool activity. `observeRun` now tracks in-flight tool calls (`toolcall_start`/`toolcall_end`) as they stream from the model rather than only during sub-millisecond execution, the tracker records `lastActivity` sequence between text and tools, and `describeActivity` prioritizes completed tool calls (`describeCompletedToolCall`) over stale narration whenever a tool has completed more recently.
 
-## [2026.10.18-r3] - 2026-10-18
+## [2026.10.183] - 2026-10-18
 
 ### Fixed
 - **Gallery preview and README screenshot URLs for pi.dev and npm.** Swapped relative screenshot paths in `README.md` to absolute raw GitHub URLs so package galleries (like `pi.dev`) and npm mirrors render images directly without 404s, updated `pi.image` in `package.json` to the current hub screenshot, and included `media/*.png` in the npm package distribution.
 
-## [2026.10.18-r2] - 2026-10-18
+## [2026.10.182] - 2026-10-18
 
 ### Added
 - **Draggable pane divider in Agent Hub.** The split divider between the roster list and detail pane can now be dragged horizontally with the mouse to resize the panels. The center portion of the divider displays shaded glyph handles (`▒` idle, `▓` while actively dragging in accent color) to make it visibly apparent that it is draggable. Dragging clamps the roster list width between a minimum of 18 columns and a maximum of 50% of the hub width, and persists the custom width across navigation and view reloads.
 
-## [2026.10.18-r1] - 2026-10-18
+## [2026.10.181] - 2026-10-18
 
 ### Fixed
 - **Global `/pause` and `/continue` now pause and resume workflow runs alongside agents.** `/pause` previously filtered for top-level subagents (`isTopLevelAgent`) and ignored running `SubagentWorkflow` tasks. It now parks active workflow tasks via `pauseWorkflowTask`, saves their execution state (script, journal path, args, tool call id) to the pause manifest, and notifies with the count of paused workflows. `/continue` resumes in-memory paused workflows via `resumeWorkflowTask` or relaunches them across process restarts using journal replay, clearing the manifest entry on completion ([#5](https://github.com/ahati/pi-subagents-hub/issues/5)).
 - **Agent-owned nested subagents are now visible and manageable in the hub UI.** The roster previously filtered for top-level agents only (`isTopLevelAgent`), hiding nested child subagents spawned by other agents. The hub now displays nested subagents in a hybrid 1-level hierarchy: immediate children render beneath their parent with `├`/`└` tree glyphs and 1-level indent, displaying their live transcript and identity upon selection, and accepting direct actions (`Enter` steer, `x` stop, `l` log, while `p` pause is refused with an honest notification). Deeper nesting (grandchildren and beyond) displays a delegation badge (`↳N`) flush right; pressing `→` drills down into that child's scope, while `←` or `Esc` ascends back up to the parent scope ([#4](https://github.com/ahati/pi-subagents-hub/issues/4)).
 
-## [2026.10.17-r1] - 2026-10-17
+## [2026.10.171] - 2026-10-17
 
 ### Added
 - **Pi-native UI style for overlay windows and status bar.** Window frames in the agent hub and conversation viewer render with edge-to-edge rules without outer side rails (`│`) or rounded box corners (`╭`, `╮`, `╰`, `╯`) to align with Pi's native chrome conventions, fullscreen overlays pin flush to terminal edges without top/bottom row gaps, active roster selections use Pi's native `selectedBg` token across pane cells, and the status bar displays themed accent spinners and dim labels in Pi's footer. Configurable via `uiStyle: "pi" | "claude"` in `subagents.json` or `/agents → Settings → UI style` (defaults to `"pi"`), with `"claude"` style preserving Claude Code-compatible rounded boxes and plain text status.
@@ -81,7 +81,7 @@ check the entries below for behaviour changes.
 - **Workflow-run children now report live activity in the hub, and tool output never becomes a tail.** The workflow host's `spawnAgent`/`resumeAgent` created no activity tracker, so the agents a run page lists never showed tool calls; they now register the same tracker every other spawn path uses (keyed per child, dropped on settle), and `runAgentTail` follows upstream's invariant — only tracker state feeds the line: the active calls' phrases (`editing src/auth.ts`), the last streamed line (which persists through the thinking window, so it is not cleared between messages), the last completed call in past tense (`searched 'cleanup'`) for agents that have not narrated yet, and only for records with no tracker the newest assistant narration. `thinking…` means literally nothing has happened — no tool ran, no text streamed. The prior fallback printed the first line of the newest tool result (grep matches, `--- exports ---`, `}` of pretty-printed JSON); that branch is gone. The hub log's `note` line follows the same last-contentful-line rule, and background resumes forward `onTextDelta` so their streamed text is live too.
 - **The activity subtext names what a running tool call touches, and keeps the last output line between turns.** The `⎿` line on the agents widget, the foreground `Agent` row and the hub read `editing src/auth.ts` or `searching 'cleanup'` instead of a bare count (`reading 2 files…`); commands stay generic (`running command`) — a truncated fragment of a real command line reads as noise.: `observeRun` now forwards pi's `tool_execution_start` args, the activity tracker keys calls by `toolCallId` (so parallel same-tool calls can no longer pin a verb forever), and distinct calls render as up to three phrases with a `+N more` tail.
 
-## [2026.10.16-r1] - 2026-10-16
+## [2026.10.161] - 2026-10-16
 ### Added
 - **A parked workflow run's agents now say so.** The run row read `‖ paused`, but the agents it owns kept rendering as a live spinner — `WorkflowDisplayState` had no `paused` member and the hub treated a parked run as active, so an owned agent was indistinguishable from one of a healthy run. `displayState` now takes the owning run's status and derives `paused` for every row a parked run owns that has not settled (`‖` dim plus a `run paused` annotation, with a queued row's `waiting` clock kept); the run log says `still running (run paused)`, the run pages' live tail and copy/pause subject keep working through a park, and the `↳` line's in-flight count includes paused rows. Skip/retry stay offered during a park, as before. Whether pausing a run should suspend its in-flight agents remains a separate question — this is the readable state only ([#3](https://github.com/ahati/pi-subagents-hub/issues/3), from [tintinweb/pi-subagents#393](https://github.com/tintinweb/pi-subagents/issues/393)).
 - **Paused agents with no persisted session survive a quit and are re-run by `/continue`.** The pause manifest previously listed only agents with a session file, so `persist_session: false` and queued spawns were lost on quit; each row now carries a respawn recipe (the original prompt plus the model, thinking level, turn cap and isolation the live record held), and `/continue` re-runs it fresh after a restart — reclaiming its handle and alias — while still resuming session-backed agents exactly. The `/pause` and `/continue` reports say so, and the "quitting loses it" warning is now reserved for a paused record with neither a session file nor a prompt. A re-run starts a new conversation: the earlier transcript and tool state are gone.
@@ -143,7 +143,7 @@ check the entries below for behaviour changes.
 - **Package media metadata points at this fork.** `pi.video` and `pi.image` still referenced `tintinweb/pi-subagents`; both now use `ahati/pi-subagents-hub`.
 
 
-## [2026.10.14-r1] - 2026-10-14
+## [2026.10.141] - 2026-10-14
 
 ### Added
 - **`subagents:rpc:steer` lets a cross-extension caller message an agent it spawned** ([#292](https://github.com/tintinweb/pi-subagents/pull/292) — thanks [@efpiva](https://github.com/efpiva)). The bus-side half of `steer_subagent`: id only, the same ownership guard as `stop`, `Agent is not running` once the agent has settled, and it emits `subagents:steered` like the tool does. Outside the `ping` handshake like `consume`.
@@ -152,7 +152,7 @@ check the entries below for behaviour changes.
 - **Steering from the conversation viewer or the fleet list now emits `subagents:steered`.** Only the `steer_subagent` tool and an `@handle` steer did before, so an extension watching the event missed every steer typed into a viewer. The event now fires from `AgentManager.steer`, which every path except the steer tools goes through.
 - **Resumed agents are bounded by `max_turns` again, and their turn counter moves** (fixes [#368](https://github.com/tintinweb/pi-subagents/issues/368) — thanks [@mratsim](https://github.com/mratsim)). The steer → grace → abort machine ran only over a spawn's first prompt, so a resume — from the `Agent` tool, an `@handle`, a nested agent or a workflow — had no turn limit at all and its widget row stayed at `↻1`. A resumed run now gets a fresh budget counted from the resume prompt, resolved as for a spawn, and can end `steered` or `aborted` like the first run.
 
-## [2026.10.13-r2] - 2026-10-13
+## [2026.10.132] - 2026-10-13
 
 ### Changed
 
@@ -162,13 +162,13 @@ check the entries below for behaviour changes.
 
 - **`session_shutdown` now disposes the widget and group-join manager** (fixes [#256](https://github.com/tintinweb/pi-subagents/issues/256), [#316](https://github.com/tintinweb/pi-subagents/pull/316) — thanks [@joshua-zyy](https://github.com/joshua-zyy)). The handler released the fleet, scheduler and manager but left the `AgentWidget` render interval and the `GroupJoinManager` group timeouts running. Because `session_shutdown` also fires on reload and session replacement, where the Node process survives, those timers outlived the activation and fired into the next session's UI and group state, accumulating across reloads. `session_before_switch` still keeps both, since a vetoed switch continues the session.
 
-## [2026.10.13-r1] - 2026-10-13
+## [2026.10.131] - 2026-10-13
 
 ### Fixed
 
 - **Workflow inspector's log level catches up to the agent hub's log view.** The embedded conversation now scrolls with the mouse wheel on both TUI routes (pi's fullscreen dispatch and regular-mode capture, released when the dialog closes); `f` expands the inspector to the full terminal and back, carrying the level and selection across the reopen; `c` copies the shown agent's settled result; and `p` pauses or resumes it through the same funnel as `/agents pause` — a key the footer had been advertising all along without wiring. The log footer now advertises `c copy` and `f expand` alongside the existing hints, and its `p` hint is gated on the agent's lifecycle and the wiring instead of lying in both directions. At the two levels above the log, the wheel moves the visible selection, the hub roster's rule. Copy is one shared implementation (`copy-result.ts`) for the hub and the inspector.
 
-## [2026.10.12-r2] - 2026-10-12
+## [2026.10.122] - 2026-10-12
 
 ### Added
 - **The workflow inspector gets the agent hub's windowed popup design and a third level: the selected agent's live conversation, embedded.** Enter on a workflow run now opens a hub-style window — the run's name and counters in a bordered header row, the key hints in a bordered footer, `border`-coloured rules — sized like the hub's popup too, filling the same 70%-of-terminal panel instead of shrink-wrapping to the content. Drilling in: `⏎` on a phase shows the Prompt/Activity/Outcome detail (prompt expansion moved to `e`), and `⏎` on an agent with a conversation descends to its live `ConversationViewer` in the right pane — partial messages and tool output streaming in place, `↑↓` switching agents, `esc` walking back one level at a time. `c` still opens the hub's conversation panel over the whole dialog; a record swept in the meantime says so instead of drawing a dead pane.
@@ -180,7 +180,7 @@ check the entries below for behaviour changes.
 ### Changed
 - **Background completions that finish together reach the parent as one message, and none waits for its siblings, as in Claude Code** ([#388](https://github.com/tintinweb/pi-subagents/pull/388)). Delivery moves from per-notification 200 ms hold timers to a completion outbox that sends what is pending as one message at the parent's next boundary: a busy parent gets everything that finished during its tool batch before its next model call; an idle parent gets a turn about 200 ms after a completion, with anything else that finished in that window. The default `smart` join mode no longer holds a finished agent for up to 30 s until its siblings finish (`async` now means the same as `smart`); `group` batches by parent turn instead of a 100 ms spawn window. A completion pending when you press Esc is no longer dropped: it is delivered once the interrupted turn stops, starting a turn, as Claude Code does. `get_subagent_result` now suppresses a notification any time before it is sent, not only within the old 200 ms hold. **Park integration kept:** a notification built while the main turn is parked still cannot wake the park — the outbox holds it until `/continue` flushes it, along with the results captured at `/pause`.
 
-## [2026.10.12-r1] - 2026-10-12
+## [2026.10.121] - 2026-10-12
 
 ### Added
 - **Merged upstream `tintinweb/pi-subagents` through 7d83085.** Four upstream changes land on the fork:
@@ -192,12 +192,12 @@ check the entries below for behaviour changes.
 ### Changed
 - **Background completions reach a busy parent after its current tool batch, as in Claude Code** ([#387](https://github.com/tintinweb/pi-subagents/pull/387), closes [upstream #188](https://github.com/tintinweb/pi-subagents/issues/188) — thanks [@xz-dev](https://github.com/xz-dev)). Completion notifications for agents, groups and workflows were sent as pi follow-ups, held until the parent would stop, so a parent busy with tool calls could see a finished child minutes late, after its final answer. They now use pi's steering queue: a busy parent sees a completion before its next model call, running tools are not interrupted, and an idle parent still gets a new turn. Notifications still hold while a park is up and flush on `/continue`.
 
-## [2026.10.11-r2] - 2026-10-11
+## [2026.10.112] - 2026-10-11
 
 ### Fixed
 - **`npm publish` completes and the release pipeline runs clean.** The `-rN` calendar suffix is a semver prerelease, so npm refused an implicit `latest` tag — `publishConfig.tag` now pins it explicitly, and `"type": "module"` makes the ESM `dist/` output formal instead of relying on Node's syntax detection (also silencing the Vite config-loader warning). One worktree test still called the pre-`pi.exec` signature, verified nothing and emitted a Node `DEP0187` deprecation warning — it now exercises the isolation-switch behavior it claims; six other tests silence the failure-path logs they deliberately provoke.
 
-## [2026.10.11-r1] - 2026-10-11
+## [2026.10.111] - 2026-10-11
 
 ### Added
 - **The conversation panel and hub chat stream a subagent's in-flight message.** The viewer rendered completed messages only, so while the model was writing, the pane showed a bare header and nothing else until the turn finished. The partial assistant message now renders as it grows — text through the same Markdown pipeline (its cache already handles append-only growth), thinking blocks through the same receded preview — with a dim `✻ thinking…` line under the header while nothing legible has arrived. (Adapted from the community fork's [#4](https://github.com/mt-code/pi-subagents-community/pull/4).)
