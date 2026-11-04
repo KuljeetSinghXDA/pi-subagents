@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.11.041] - 2026-11-04
+
 ### Fixed
 - **`get_subagent_result` still finds a finished agent by handle after a reload** (ported from [tintinweb/pi-subagents#429](https://github.com/tintinweb/pi-subagents/pull/429), fixes [#428](https://github.com/tintinweb/pi-subagents/issues/428) — thanks [@HerbertGao](https://github.com/HerbertGao)). The tool accepts an agent id or its handle, a `name` or the type handle such as `explore`. That worked while the process was up, because a handle still resolved through the in-memory tombstone; after a reload the tombstone is gone and the saved `subagents:record` was matched on `id` only, so the same handle came back not found. The saved entry's handle and alias now match too, case-insensitively, while an id match still wins and resume stays id-only.
 - **The conversation viewer builds tool calls the way pi replays a saved session** (ported from [tintinweb/pi-subagents#413](https://github.com/tintinweb/pi-subagents/pull/413) — thanks [@pf-sjtu](https://github.com/pf-sjtu)). The build called `markExecutionStarted()` and `setArgsComplete()`, which request a render from inside the one that is running; `argsComplete` also made an `edit` call compute its preview by reading the file from disk — for a historical call, the file as it is now — before the recorded diff replaced it. Neither is called now. A call from an aborted or failed response shows `Operation aborted` or the provider's error instead of looking pending forever.
