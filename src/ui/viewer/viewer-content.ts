@@ -137,11 +137,18 @@ export function buildTranscript(ctx: TranscriptContext): TranscriptBuild {
       if (msg === streamingRef && msg.content.length === 0) {
         container.addChild(new Text(th.fg("dim", "  ✻ thinking…"), 0, 0));
       }
+      // An aborted or failed response never runs its calls, so none of them gets
+      // a result: each says why instead of looking pending, as pi's replay does.
+      const notRun = msg.stopReason === "aborted"
+        ? "Operation aborted"
+        : msg.stopReason === "error"
+          ? msg.errorMessage || "Error"
+          : undefined;
       for (const c of msg.content) {
         if (c.type !== "toolCall") continue;
         const callId = (c as any).id ?? (c as any).toolUseId;
         const comp = toolComponent(ctx, c as any);
-        feedTool(ctx, comp, c as any, callId, resultById.get(callId), consumedResults, running, partials);
+        feedTool(ctx, comp, c as any, callId, resultById.get(callId), consumedResults, running, partials, notRun);
         container.addChild(comp);
         toolComponents.push(comp);
       }
@@ -203,8 +210,13 @@ function toolComponent(ctx: TranscriptContext, call: { name?: string; toolName?:
   const name = call.name ?? call.toolName ?? "unknown";
   const args = call.arguments ?? call.input;
   const callId = String(call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`);
-  // The call has, by definition of being in the transcript, started and its
-  // arguments are complete — what pi's live context would report mid-stream.
+  // Built the way pi replays a saved session: the message is final, so its
+  // arguments are complete in the transcript and the call has, by definition of
+  // being in one, already started. Neither `markExecutionStarted()` nor
+  // `setArgsComplete()` is called — both request a render from inside this one,
+  // and `argsComplete` makes the edit renderer compute a diff by reading the
+  // file from disk, which for a historical call previews the file as it is now.
+  //
   // `ui` must NOT prototype from pi's proxied extension TUI (`Object.create`
   // here once made pi's current-TUI resolution land back on this shadow, and
   // a renderer's ctx.invalidate() recursed requestRender until the stack
@@ -221,8 +233,6 @@ function toolComponent(ctx: TranscriptContext, call: { name?: string; toolName?:
     toolUi,
     process.cwd(),
   );
-  comp.markExecutionStarted();
-  comp.setArgsComplete();
   if (ctx.expanded) comp.setExpanded(true);
   ctx.toolComponents.set(call, comp);
   return comp;
@@ -237,6 +247,7 @@ function feedTool(
   consumedResults: Set<string>,
   running: boolean,
   partials: Map<string, string>,
+  notRun: string | undefined,
 ): void {
   let feed = ctx.toolFeeds.get(call);
   if (!feed) {
@@ -249,6 +260,13 @@ function feedTool(
       comp.updateResult({ content: result.content, details: result.details, isError: !!result.isError }, false);
       feed.final = true;
     }
+    return;
+  }
+  if (feed.final) return;
+  if (notRun) {
+    // No result will arrive: say why rather than leaving the call pending.
+    comp.updateResult({ content: [{ type: "text", text: notRun }], isError: true }, false);
+    feed.final = true;
     return;
   }
   if (!running) return;

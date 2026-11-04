@@ -57,6 +57,7 @@ async function finishedAgent(
   branch: any[],
   run: Partial<RunResult> = {},
   resumed?: Awaited<ReturnType<typeof resumeAgent>>,
+  spawn: Record<string, unknown> = {},
 ): Promise<string> {
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "THE-FULL-RESULT",
@@ -71,7 +72,7 @@ async function finishedAgent(
     .get("Agent")
     .execute(
       "tc-spawn",
-      { prompt: "Review the change.", description: "Review the change", subagent_type: "Explore", run_in_background: false },
+      { prompt: "Review the change.", description: "Review the change", subagent_type: "Explore", run_in_background: false, ...spawn },
       undefined,
       undefined,
       context,
@@ -159,5 +160,71 @@ describe("get_subagent_result falls back to the saved record", () => {
     expect(out).toContain("Status: completed");
     expect(out).toContain("THE-FULL-RESULT");
     expect(out).not.toContain("Status: paused");
+  });
+
+  it("answers by name and by type handle after reload, with no live record or tombstone", async () => {
+    const branch: any[] = [];
+    const id = await finishedAgent(branch, { responseText: "THE-NAMED-RESULT" }, undefined, { name: "auth-audit" });
+    const saved = branch.find((entry) => entry.customType === "subagents:record" && entry.data.id === id);
+    expect(saved.data).toMatchObject({ handle: "explore", alias: "auth-audit" });
+
+    // A second activation has a new manager: no live record and no tombstone,
+    // which is the reload case. The handle is stored lowercased; the call uses
+    // the casing a person or the model might actually type.
+    const byName = await readAfterReload(branch, "Auth-Audit");
+    expect(byName).toContain(`Agent: ${id}`);
+    expect(byName).toContain("Status: completed");
+    expect(byName).toContain("THE-NAMED-RESULT");
+    expect(byName).toContain("saved record");
+
+    const byType = await readAfterReload(branch, "Explore");
+    expect(byType).toContain(`Agent: ${id}`);
+    expect(byType).toContain("THE-NAMED-RESULT");
+
+    expect(await readAfterReload(branch, "no-such-handle")).toContain("Agent not found");
+  });
+
+  it("returns the latest saved record when a later agent reuses the type handle", async () => {
+    const branch: any[] = [];
+    const first = await finishedAgent(branch, { responseText: "FIRST-RESULT" }, undefined, { name: "auth-audit" });
+    // The first activation is gone, so nothing is holding "explore". The next
+    // Explore is handed that handle again and appends a second record.
+    const second = await finishedAgent(branch, { responseText: "SECOND-RESULT" });
+
+    const byHandle = await readAfterReload(branch, "explore");
+    expect(byHandle).toContain(`Agent: ${second}`);
+    expect(byHandle).toContain("SECOND-RESULT");
+    expect(byHandle).not.toContain("FIRST-RESULT");
+
+    const byName = await readAfterReload(branch, "auth-audit");
+    expect(byName).toContain(`Agent: ${first}`);
+    expect(byName).toContain("FIRST-RESULT");
+    expect(byName).not.toContain("SECOND-RESULT");
+  });
+
+  it("finds a disambiguated type handle (explore-2) after reload", async () => {
+    // Two Explores in one activation: the first keeps `explore`, so the second
+    // is numbered `explore-2`. Both persist a record; after reload the suffixed
+    // handle has to match the saved entry on its own.
+    const branch: any[] = [];
+    const { tools, lifecycle } = boot(branch);
+    const context = ctx({ sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) } });
+    const spawn = (responseText: string) => {
+      vi.mocked(runAgent).mockResolvedValueOnce({ responseText, session: { dispose: vi.fn() } as any, aborted: false, steered: false });
+      return tools
+        .get("Agent")
+        .execute("tc-spawn", { prompt: "Review.", description: "Review", subagent_type: "Explore", run_in_background: false }, undefined, undefined, context)
+        .then((res: any) => res.details.agentId as string);
+    };
+    await spawn("FIRST-RESULT");
+    const second = await spawn("SECOND-RESULT");
+    expect(branch.find((e) => e.customType === "subagents:record" && e.data.id === second)?.data.handle).toBe("explore-2");
+    await lifecycle.get("session_shutdown")?.({ reason: "quit" }, context);
+    booted = undefined;
+
+    const out = await readAfterReload(branch, "Explore-2");
+    expect(out).toContain(`Agent: ${second}`);
+    expect(out).toContain("SECOND-RESULT");
+    expect(out).not.toContain("FIRST-RESULT");
   });
 });

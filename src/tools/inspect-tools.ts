@@ -76,10 +76,16 @@ export function createGetResultTool(deps: InspectToolsDeps) {
       const record = resolveAgentRef(params.agent_id);
       if (!record) {
         // Evicted, or lost to a reload: answer from the record the session saved.
-        // An evicted handle still resolves to its id through its tombstone.
+        // An evicted handle still resolves to its id through its tombstone. After
+        // a reload there is no tombstone, so the saved entry's handle and alias
+        // have to match on their own.
         const ref = params.agent_id.replace(/^@/, "");
         const resolved = resolveMention(ref);
-        const saved = findAgentRecordEntry(ctx, resolved?.kind === "tombstone" ? resolved.entry.id : ref);
+        const saved = findAgentRecordEntry(
+          ctx,
+          resolved?.kind === "tombstone" ? resolved.entry.id : ref,
+          resolved === undefined,
+        );
         if (saved) {
           outbox.cancel(saved.id);
           return textResult(formatSavedAgentRecord(saved));

@@ -205,11 +205,10 @@ describe("tool calls render through pi's ToolExecutionComponent", () => {
     ], () => def);
     const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
     viewer.render(120);
-    // Component creation invokes the renderer more than once (constructor plus
-    // the started/args-complete marks) — what matters is that the two calls,
-    // despite the colliding id, hold distinct state objects.
-    expect(states).toHaveLength(6);
-    expect(states[0]).not.toBe(states[3]);
+    // One render per built block — what matters is that the two calls, despite
+    // the colliding id, hold distinct state objects.
+    expect(states).toHaveLength(2);
+    expect(states[0]).not.toBe(states[1]);
   });
 });
 

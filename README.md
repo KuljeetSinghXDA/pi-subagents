@@ -580,13 +580,13 @@ Check status and retrieve results from a background agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to check |
+| `agent_id` | string | yes | Agent ID or handle — its `name` if one was given, otherwise its type (`explore`, `explore-2`) |
 | `wait` | boolean | no | Wait for completion |
 | `verbose` | boolean | no | Include full conversation log |
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
 
-A finished agent's result stays retrievable after its in-memory record is cleaned up (about ten minutes after it finishes) or lost to a reload: the final record is saved in the session as a `subagents:record` entry, and `get_subagent_result` answers from it, without the stats or the conversation (`verbose`).
+A finished agent's result stays retrievable after its in-memory record is cleaned up (about ten minutes after it finishes) or lost to a reload: the final record is saved in the session as a `subagents:record` entry, and `get_subagent_result` answers from it by id or by handle, without the stats or the conversation (`verbose`).
 
 ### `steer_subagent`
 
@@ -805,7 +805,7 @@ Both places report what the run *actually* used, read back from the child sessio
 
 Toggle via `/agents → Settings → Show model`; applied live.
 
-**Conversation transcript format**: the conversation viewer renders an agent's transcript with the same components the main screen uses — pi's `AssistantMessageComponent` for assistant text (Markdown, collapsible thinking blocks, abort/error notes) and `ToolExecutionComponent` for tool calls (rich per-tool renderers, expand/collapse, streamed partial output). Messages the user sent the agent — the spawn prompt, `@handle message` mentions from the main window, hub steering — are labeled `[User]` above a main-screen user bubble, so direct addressing stays attributable in the transcript. Tool renderers resolve through pi's per-session renderer chain (`registerToolRenderer`), so renderer extensions such as pi-ui-enhancement render here exactly as on the main screen. Result surfaces render the agent's report as markdown: `get_subagent_result` (header/status as text, body as markdown, verbose conversation dimmed), the `Agent` tool's expanded result, and expanded completion notifications. The report renderers are display-only and style-independent; see **Viewer style** below for the transcript rendering.
+**Conversation transcript format**: the conversation viewer renders an agent's transcript with the same components the main screen uses — pi's `AssistantMessageComponent` for assistant text (Markdown, collapsible thinking blocks, abort/error notes) and `ToolExecutionComponent` for tool calls (rich per-tool renderers, expand/collapse, streamed partial output, and a call from an aborted or failed response says so rather than looking pending). Messages the user sent the agent — the spawn prompt, `@handle message` mentions from the main window, hub steering — are labeled `[User]` above a main-screen user bubble, so direct addressing stays attributable in the transcript. Tool renderers resolve through pi's per-session renderer chain (`registerToolRenderer`), so renderer extensions such as pi-ui-enhancement render here exactly as on the main screen. Result surfaces render the agent's report as markdown: `get_subagent_result` (header/status as text, body as markdown, verbose conversation dimmed), the `Agent` tool's expanded result, and expanded completion notifications. The report renderers are display-only and style-independent; see **Viewer style** below for the transcript rendering.
 
 **Viewer style** (`viewerStyle`, default `"chat"`): how the conversation viewer renders an agent's transcript. `"chat"` composes pi's main-screen message components — transcripts look and stream like main-chat output, and renderer extensions apply to them. `"compact"` restores the original flat transcript: `[User]` / `[Assistant]` labels, `───` separators, dim `✻ thinking` previews, `⏺ name(arg)` call lines, and tool results capped to a four-line preview (`o`/`ctrl+o` expands them), with assistant text still rendered as Markdown. Read at render time, so switching applies to an open viewer immediately; also settable via `/agents → Settings → Viewer style`.
 
