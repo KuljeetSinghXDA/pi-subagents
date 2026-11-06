@@ -12,6 +12,9 @@ check the entries below for behaviour changes.
 ### Added
 - **Subagents support transactional, crash-resilient execution with `@earendil-works/pi-durable`**. Setting `durable: true` in agent frontmatter or invocation options runs the subagent via the durable harness backed by memory or transactional storage, avoiding ad-hoc file recovery and orphaned states.
 
+### Changed
+- **The npm publish tarball ships only compiled `dist/` files** (fixes [#7](https://github.com/ahati/pi-subagents-hub/issues/7)). Added `src/` to `.npmignore` so TypeScript source files are omitted from the published npm package, dropping 111 files and 1.3 MB of unpacked payload that `pi` never loads at runtime.
+
 ### Refactored
 - **Decomposed monolithic `AgentManager` worktree tracking and `runAgent` session lifecycle according to SOLID principles**. Extracted git worktree allocation and branch teardown into `WorktreeCoordinator`, refactored `runAgent` into five modular Single Responsibility pipeline stages, and segregated fat dependency interfaces (`LifecycleDeps`, `AgentToolDeps`) into focused role contracts.
 

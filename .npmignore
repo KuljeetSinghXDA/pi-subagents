@@ -4,6 +4,9 @@ tsconfig.json
 .git/
 .gitignore
 
+# TypeScript sources — pi loads dist/
+src/
+
 # Documentation
 PLAN.md
 SUMMARY.md
