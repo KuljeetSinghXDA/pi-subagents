@@ -9,6 +9,13 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Added
+- **Subagents support transactional, crash-resilient execution with `@earendil-works/pi-durable`**. Setting `durable: true` in agent frontmatter or invocation options runs the subagent via the durable harness backed by memory or transactional storage, avoiding ad-hoc file recovery and orphaned states.
+
+### Refactored
+- **Decomposed monolithic `AgentManager` worktree tracking and `runAgent` session lifecycle according to SOLID principles**. Extracted git worktree allocation and branch teardown into `WorktreeCoordinator`, refactored `runAgent` into five modular Single Responsibility pipeline stages, and segregated fat dependency interfaces (`LifecycleDeps`, `AgentToolDeps`) into focused role contracts.
+
+
 ## [2026.11.041] - 2026-11-04
 
 ### Fixed

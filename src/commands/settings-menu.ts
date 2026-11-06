@@ -102,7 +102,7 @@ export interface SettingsMenuDeps {
   setWidgetMode: (m: WidgetMode) => void;
 }
 
-export function snapshotSettings(deps: SettingsMenuDeps) {
+function snapshotSettings(deps: SettingsMenuDeps) {
   return {
     maxConcurrent: deps.manager.getMaxConcurrent(),
     maxConcurrentForeground: deps.manager.getMaxConcurrentForeground(),
@@ -141,20 +141,20 @@ type _NoMissingSettingsKeys =
 const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
 void _settingsSnapshotIsComplete;
 
-export function gateAdmitsAnything(gate: ReturnType<typeof getPackageAgentsGate>): boolean {
+function gateAdmitsAnything(gate: ReturnType<typeof getPackageAgentsGate>): boolean {
   if (gate === undefined || gate === true) return true;
   if (gate === false) return false;
   return gate.length > 0;
 }
 
-export function describeGateSetting(gate: ReturnType<typeof getPackageAgentsGate>, base: string): string {
+function describeGateSetting(gate: ReturnType<typeof getPackageAgentsGate>, base: string): string {
   if (!Array.isArray(gate)) return base;
   return gate.length > 0
     ? `${base} Currently limited to: ${gate.join(", ")}.`
     : `${base} Currently limited to an empty list, so nothing loads.`;
 }
 
-export function notifyApplied(
+function notifyApplied(
   ctx: ExtensionCommandContext,
   successMsg: string,
   deps: SettingsMenuDeps,

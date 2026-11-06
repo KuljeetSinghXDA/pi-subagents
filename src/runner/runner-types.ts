@@ -79,6 +79,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. */
   isolated?: boolean;
+  /** Execute through @earendil-works/pi-durable engine with transactional storage. */
+  durable?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /**

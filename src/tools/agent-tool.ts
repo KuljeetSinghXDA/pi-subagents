@@ -30,20 +30,25 @@ import { getLifetimeCost } from "../usage.js";
 import { renderAgentToolCall, renderAgentToolResult } from "./agent-tool-render.js";
 import { buildAgentToolDescription, buildAgentToolParams } from "./agent-tool-schema.js";
 
-export interface AgentToolDeps {
-  pi: ExtensionAPI;
-  manager: AgentManager;
+/** UI and presentation services required by the Agent tool for status updates and widgets. */
+export interface AgentToolPresentationDeps {
   agentActivity: Map<string, AgentActivity>;
   widget: AgentWidget;
   fleet: FleetList;
+  isShowCostEnabled: () => boolean;
+  getToolDescriptionMode: () => ToolDescriptionMode;
+}
+
+/** Execution, scheduling, and lifecycle services required to spawn or resume subagents. */
+export interface AgentToolSpawnDeps {
+  pi: ExtensionAPI;
+  manager: AgentManager;
   scheduler: SubagentScheduler;
   foregroundHandoffs: Map<string, () => void>;
   reloadCustomAgents: () => void;
   getBackgroundByDefault: () => boolean;
   isSchedulingEnabled: () => boolean;
   isWorktreeIsolationEnabled: () => boolean;
-  isShowCostEnabled: () => boolean;
-  getToolDescriptionMode: () => ToolDescriptionMode;
   getDefaultJoinMode: () => JoinMode;
   resumeTurnLimit: (record: AgentRecord, explicit?: number) => number | undefined;
   startBackgroundResume: (
@@ -54,6 +59,9 @@ export interface AgentToolDeps {
   ) => Promise<AgentRecord | undefined>;
   joinTurnGroup: (id: string, joinMode: JoinMode | undefined) => void;
 }
+
+/** Composite dependencies for creating the Agent tool (satisfies ISP via segregated sub-interfaces). */
+export interface AgentToolDeps extends AgentToolPresentationDeps, AgentToolSpawnDeps {}
 
 export function createAgentTool(deps: AgentToolDeps) {
   const {

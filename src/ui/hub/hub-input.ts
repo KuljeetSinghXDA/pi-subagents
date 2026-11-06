@@ -240,7 +240,7 @@ export function dispatchHubInput(host: AgentHubInputHost, data: string): void {
   host.requestRender();
 }
 
-export function handleLogKey(host: AgentHubInputHost, data: string): boolean {
+function handleLogKey(host: AgentHubInputHost, data: string): boolean {
   const down = matchesKey(data, "down") || matchesKey(data, "j");
   const up = matchesKey(data, "up") || matchesKey(data, "k");
   if (down || up) { host.stopArmed = false; host.scrollLog(down ? 1 : -1); return true; }
@@ -253,7 +253,7 @@ export function handleLogKey(host: AgentHubInputHost, data: string): boolean {
   return false;
 }
 
-export function enterPage(host: AgentHubInputHost, items: HubEntry[]): void {
+function enterPage(host: AgentHubInputHost, items: HubEntry[]): void {
   host.stopArmed = false;
   if (host.page === "R") {
     const entry = items[host.selected];
@@ -324,7 +324,7 @@ export function pageUnhandledKey(host: AgentHubInputHost, data: string): boolean
   return false;
 }
 
-export function runAgentKey(host: AgentHubInputHost, kind: "skip" | "retry"): void {
+function runAgentKey(host: AgentHubInputHost, kind: "skip" | "retry"): void {
   const actions = host.runAgentActionKeys();
   if (kind === "skip" ? actions.skip : actions.retry) {
     if (kind === "skip") skipRunAgent(host);
@@ -332,7 +332,7 @@ export function runAgentKey(host: AgentHubInputHost, kind: "skip" | "retry"): vo
   }
 }
 
-export function moveRunSelection(host: AgentHubInputHost, delta: 1 | -1): void {
+function moveRunSelection(host: AgentHubInputHost, delta: 1 | -1): void {
   if (host.runAgents().length === 0) return;
   const next = Math.min(host.runAgents().length - 1, Math.max(0, host.clampRunAgentIndex() + delta));
   if (next === host.runAgentSel) return;
@@ -358,7 +358,7 @@ export function moveRunItem(host: AgentHubInputHost, delta: number): void {
 /** How far PgUp/PgDn stride the run page's item cursor, in list items. */
 const RUN_ITEM_PAGE_STEP = 10;
 
-export function stopRun(host: AgentHubInputHost): void {
+function stopRun(host: AgentHubInputHost): void {
   const run = host.page === "W" || host.page === "L" ? host.currentRun() : host.entries()[host.selected]?.kind === "workflow" ? (host.entries()[host.selected] as { workflow: FleetWorkflow }).workflow : undefined;
   if (!run || (run.status !== "running" && run.status !== "paused")) return;
   host.runId = run.id;
@@ -368,7 +368,7 @@ export function stopRun(host: AgentHubInputHost): void {
   host.requestRender();
 }
 
-export function pauseResumeRun(host: AgentHubInputHost): void {
+function pauseResumeRun(host: AgentHubInputHost): void {
   const run = host.currentRun();
   const controls = host.pageControls();
   if (!run || !controls) return;
@@ -380,7 +380,7 @@ export function pauseResumeRun(host: AgentHubInputHost): void {
   host.requestRender();
 }
 
-export function skipRunAgent(host: AgentHubInputHost): void {
+function skipRunAgent(host: AgentHubInputHost): void {
   const controls = host.pageControls();
   const entry = host.runAgents()[host.clampRunAgentIndex()];
   if (!controls || !entry) return;
@@ -390,7 +390,7 @@ export function skipRunAgent(host: AgentHubInputHost): void {
   host.requestRender();
 }
 
-export function retryRunAgent(host: AgentHubInputHost): void {
+function retryRunAgent(host: AgentHubInputHost): void {
   const controls = host.pageControls();
   const entry = host.runAgents()[host.clampRunAgentIndex()];
   if (!controls || !entry) return;
@@ -400,7 +400,7 @@ export function retryRunAgent(host: AgentHubInputHost): void {
   host.requestRender();
 }
 
-export function stopSelected(host: AgentHubInputHost, items: HubEntry[]): void {
+function stopSelected(host: AgentHubInputHost, items: HubEntry[]): void {
   const entry = items[host.selected];
   if (!entry || entry.kind !== "agent") return;
   const record = entry.record;
@@ -417,7 +417,7 @@ export function stopSelected(host: AgentHubInputHost, items: HubEntry[]): void {
   host.requestRender();
 }
 
-export function pauseResumeAgent(host: AgentHubInputHost, record: AgentRecord): void {
+function pauseResumeAgent(host: AgentHubInputHost, record: AgentRecord): void {
   if (record.parentAgentId !== undefined) {
     host.deps.notify?.(`Cannot pause "${record.description}" — agents owned by another agent refuse to pause.`, "warning");
     return;
@@ -438,23 +438,23 @@ export function pauseResumeAgent(host: AgentHubInputHost, record: AgentRecord): 
   host.requestRender();
 }
 
-export function pauseResumeSelected(host: AgentHubInputHost, items: HubEntry[]): void {
+function pauseResumeSelected(host: AgentHubInputHost, items: HubEntry[]): void {
   const entry = items[host.selected];
   if (entry?.kind !== "agent") return;
   pauseResumeAgent(host, entry.record);
 }
 
-export function copyFocusedResult(host: AgentHubInputHost): void {
+function copyFocusedResult(host: AgentHubInputHost): void {
   const record = host.focusedRecord();
   if (record) copyRecordResult(record, (message, type) => host.deps.notify?.(message, type));
 }
 
-export function pauseResumeFocused(host: AgentHubInputHost): void {
+function pauseResumeFocused(host: AgentHubInputHost): void {
   const record = host.focusedRecord();
   if (record) pauseResumeAgent(host, record);
 }
 
-export function stopFocused(host: AgentHubInputHost): void {
+function stopFocused(host: AgentHubInputHost): void {
   const record = host.focusedRecord();
   if (!record || (record.status !== "running" && record.status !== "queued")) return;
   if (!host.stopArmed) {
@@ -469,7 +469,7 @@ export function stopFocused(host: AgentHubInputHost): void {
   host.requestRender();
 }
 
-export function pushLogPage(host: AgentHubInputHost): void {
+function pushLogPage(host: AgentHubInputHost): void {
   if (host.page === "R") {
     if (!host.transcriptPage()) return;
     const record = host.focusedRecord();

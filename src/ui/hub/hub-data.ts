@@ -3,7 +3,6 @@
  */
 
 import { isTopLevelAgent } from "../../agent-manager.js";
-import type { AgentRecord } from "../../types.js";
 import { buildPhaseGroups, type PhaseGroup } from "../../workflow/progress.js";
 import type { FleetWorkflow } from "../fleet-list.js";
 import {
@@ -22,24 +21,6 @@ export function hubWorkflows(deps: AgentHubDeps): FleetWorkflow[] {
       || run.status === "paused"
       || (run.completedAt != null && now - run.completedAt < FINISHED_LINGER_MS)
     )
-    .sort((a, b) => a.startedAt - b.startedAt);
-}
-
-/**
- * Every top-level agent with a session, earliest-launched first.
- */
-export function hubAgents(deps: AgentHubDeps): AgentRecord[] {
-  return deps.manager.listAgents()
-    .filter(a => isTopLevelAgent(a) && a.session)
-    .sort((a, b) => a.startedAt - b.startedAt);
-}
-
-/**
- * Child agents owned by parentId with a session, earliest-launched first.
- */
-export function childAgentsOf(deps: AgentHubDeps, parentId: string): AgentRecord[] {
-  return deps.manager.listAgents()
-    .filter(a => a.parentAgentId === parentId && a.session)
     .sort((a, b) => a.startedAt - b.startedAt);
 }
 

@@ -128,7 +128,7 @@ export async function showCreateWizard(ctx: ExtensionCommandContext, deps: Wizar
   }
 }
 
-export async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string, deps: WizardDeps) {
+async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string, deps: WizardDeps) {
   const description = await ctx.ui.input("Describe what this agent should do");
   if (!description) return;
 
@@ -209,7 +209,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 }
 
-export async function showManualWizard(ctx: ExtensionCommandContext, targetDir: string, reloadCustomAgents: () => void) {
+async function showManualWizard(ctx: ExtensionCommandContext, targetDir: string, reloadCustomAgents: () => void) {
   const name = await ctx.ui.input("Agent name (filename, no spaces)");
   if (!name) return;
 

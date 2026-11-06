@@ -16,8 +16,6 @@ import type { WorkflowDialogSource } from "../workflow-view.js";
 export const FINISHED_LINGER_MS = 4000;
 /** Re-render cadence so elapsed/activity/stats tick while the hub is open. */
 export const TICK_MS = 200;
-/** The legacy activity table's body floor — the hub window derives its body from the frame. */
-export const MIN_BODY_ROWS = 3;
 
 /**
  * The roster's top-level group headers, in display order.
@@ -223,16 +221,6 @@ export function lifecycleRank(status: AgentRecord["status"]): number {
     default:
       return 2;
   }
-}
-
-/** The last non-empty line of a streamed or settled text — the freshest output. */
-export function lastNonEmptyLine(text: string): string {
-  const lines = text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line) return line;
-  }
-  return "";
 }
 
 /**

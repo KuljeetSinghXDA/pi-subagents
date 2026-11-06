@@ -26,7 +26,8 @@ import type { WorkflowTask } from "../workflow/task.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
-export interface LifecycleDeps {
+/** Stateful services and registries coordinated during session lifecycle. */
+export interface AgentLifecycleState {
   manager: AgentManager;
   park: ParkGateController;
   widget: AgentWidget;
@@ -36,23 +37,34 @@ export interface LifecycleDeps {
   scheduler: SubagentScheduler;
   foregroundHandoffs: Map<string, () => void>;
   workflowTasks: Map<string, WorkflowTask>;
+  ownsManagerRegistry: boolean;
+  registryEntry: any;
+  getCurrentCtx: () => ExtensionContext | undefined;
+  setCurrentCtx: (ctx: ExtensionContext | undefined) => void;
+}
+
+/** Lifecycle operations and agent state management actions. */
+export interface AgentLifecycleActions {
   reloadCustomAgents: () => void;
   syncPauseManifest: (ctx: ExtensionContext) => void;
   pauseAgentRecord: (rec: AgentRecord) => string | undefined;
   resumeAgentById: (ctx: ExtensionContext, rec: AgentRecord, prompt?: string) => Promise<boolean>;
   resolveAgentRef: (ref: string) => AgentRecord | undefined;
+  spawnTopLevel: (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => string;
+}
+
+/** Dynamic feature flags and extension capability bridges. */
+export interface AgentLifecycleFeatures {
   isSchedulingEnabled: () => boolean;
   isWorkflowsEnabled: () => boolean;
   resolveWorkflowCollisions: (ctx: ExtensionContext) => void;
   runWorkflowFlag: (ctx: ExtensionContext) => void;
   registerMentionProvider: (ctx: ExtensionContext) => void;
-  spawnTopLevel: (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => string;
-  ownsManagerRegistry: boolean;
-  registryEntry: any;
   registerTurnGroup: () => void;
-  getCurrentCtx: () => ExtensionContext | undefined;
-  setCurrentCtx: (ctx: ExtensionContext | undefined) => void;
 }
+
+/** Unified dependency contract for session lifecycle coordination (composes segregated ISP interfaces). */
+export interface LifecycleDeps extends AgentLifecycleState, AgentLifecycleActions, AgentLifecycleFeatures {}
 
 export function createHandoffWatcher(
   pi: ExtensionAPI,

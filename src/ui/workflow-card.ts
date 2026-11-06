@@ -47,13 +47,6 @@ import {
 } from "../workflow/progress.js";
 import type { Theme } from "./agent-widget.js";
 
-/**
- * Header re-render cadence. Claude Code ticks the workflow clock once a second,
- * not at the 80ms spinner cadence — the running glyph is static, so there is
- * nothing to animate faster than the elapsed time changes.
- */
-export const WORKFLOW_TICK_MS = 1000;
-
 /** Widest label column before stats stop being aligned and just follow the label. */
 const LABEL_COLUMN_MAX = 28;
 

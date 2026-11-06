@@ -36,27 +36,28 @@ import {
   resumeRecord,
   settleOutcome,
 } from "./manager/resume-handler.js";
+import { WorktreeCoordinator } from "./manager/worktree-coordinator.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import type { AgentRecord, AgentTombstone, MentionResolution, SubagentType } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees } from "./worktree.js";
 
 export * from "./manager/agent-registry.js";
 export * from "./manager/concurrency-pool.js";
 export * from "./manager/manager-types.js";
 export * from "./manager/resume-handler.js";
+export * from "./manager/worktree-coordinator.js";
 
 export class AgentManager {
   private readonly registry = new AgentRegistry();
   private readonly pool: ConcurrencyPool;
+  private readonly worktrees = new WorktreeCoordinator();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
-  private worktreeRepos = new Set<string>();
   private startups = new Map<string, Promise<void>>();
 
   get runningBackground(): number {
@@ -275,26 +276,28 @@ export class AgentManager {
         ? options.isolation
         : getAgentConfig(type)?.isolation ?? options.isolation;
     let worktreeCwd: string | undefined;
-    if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
-      const wt = await createWorktree(pi, baseCwd, id);
-      if (!wt) {
-        this.pool.releaseSlot(record);
-        throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
-        );
-      }
-      record.worktree = wt;
-      worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
-      this.worktreeRepos.add(baseCwd);
-      record.invocation ??= {};
-      record.invocation.isolation = "worktree";
+    if (isolation === "worktree") {
+      try {
+        const wtSetup = await this.worktrees.setup(pi, baseCwd, id, customCwd);
+        if (wtSetup) {
+          record.worktree = wtSetup.wt;
+          worktreeCwd = wtSetup.worktreeCwd;
+          record.invocation ??= {};
+          record.invocation.isolation = "worktree";
 
-      if (record.status !== "running") {
+          if (record.status !== "running") {
+            this.pool.releaseSlot(record);
+            await this.worktrees.cleanup(pi, baseCwd, record, {
+              description: options.description,
+              customCwd,
+            });
+            this.drainQueue();
+            return;
+          }
+        }
+      } catch (err) {
         this.pool.releaseSlot(record);
-        record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
-        this.drainQueue();
-        return;
+        throw err;
       }
     }
 
@@ -378,20 +381,11 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        if (record.worktree) {
-          if (options.onBeforeWorktreeCleanup) {
-            try {
-              await options.onBeforeWorktreeCleanup(record.worktree.path);
-            } catch { /* ignore */ }
-          }
-          const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
-          record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
-          }
-        }
+        await this.worktrees.cleanup(pi, baseCwd, record, {
+          description: options.description,
+          customCwd,
+          onBeforeWorktreeCleanup: options.onBeforeWorktreeCleanup,
+        });
 
         this.abortOwnedChildren(id);
         this.settleRun(record, true);
@@ -410,12 +404,10 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        if (record.worktree) {
-          try {
-            const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
-            record.worktreeResult = wtResult;
-          } catch { /* ignore */ }
-        }
+        await this.worktrees.cleanup(pi, baseCwd, record, {
+          description: options.description,
+          customCwd,
+        });
 
         this.abortOwnedChildren(id);
         this.settleRun(record, false);
@@ -714,9 +706,7 @@ export class AgentManager {
     this.startups.clear();
     this.pool.pausedQueued.clear();
     if (pi) {
-      const prune = (repo: string) => { pruneWorktrees(pi, repo).catch(() => {}); };
-      prune(process.cwd());
-      for (const repo of this.worktreeRepos) prune(repo);
+      this.worktrees.pruneAll(pi);
     }
     await Promise.all(sessions.map(session => shutdownChildSession(session)));
   }

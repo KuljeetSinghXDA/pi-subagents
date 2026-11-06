@@ -4,6 +4,7 @@
 
 import { resolve } from "node:path";
 import {
+  type AgentSession,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionContext,
@@ -38,7 +39,8 @@ import {
   createStructuredOutputTool,
   structuredRetryPrompt,
 } from "../structured-output.js";
-import type { SubagentType } from "../types.js";
+import type { AgentConfig, SubagentType } from "../types.js";
+import { runDurableAgent } from "./durable-runner.js";
 import {
   extensionCanonicalNames,
   installExtensionToolScope,
@@ -71,15 +73,6 @@ import {
 /**
  * Open an agent's saved session to continue it — or a copy of it, when the
  * session belongs to another parent.
- *
- * pi's `/fork` and `/clone` copy the parent's entries, saved agent records
- * included, so two parent sessions can each resume the same agent. Appending
- * both continuations to one file would interleave two histories in it. The
- * child's header names the parent that spawned it; a resume from any other
- * parent forks the child alongside, exactly as pi forked the parent, and the
- * copy is that parent's from then on. A header with no parent (a child
- * spawned from a context without a session file) gives nothing to compare,
- * so it opens in place as before.
  */
 function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
   const opened = SessionManager.open(file, sessionDir);
@@ -88,21 +81,24 @@ function reopenSession(file: string, parentSessionFile: string | undefined, sess
   return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
 }
 
-export async function runAgent(
+interface PreparedSystemPrompt {
+  systemPrompt: string;
+  toolNames: string[];
+  noSkills: boolean;
+}
+
+/**
+ * SRP Phase 1: Prepare the agent's system prompt, inheritance, memory blocks, and skills.
+ */
+async function prepareAgentSystemPrompt(
   ctx: ExtensionContext,
   type: SubagentType,
-  prompt: string | undefined,
+  agentConfig: AgentConfig | undefined,
+  config: ReturnType<typeof getConfig>,
+  effectiveCwd: string,
+  configCwd: string,
   options: RunOptions,
-): Promise<RunResult> {
-  if (prompt === undefined && options.resumeSessionFile === undefined) {
-    throw new Error("runAgent requires a prompt unless resumeSessionFile is set");
-  }
-  const config = getConfig(type);
-  const agentConfig = getAgentConfig(type);
-
-  const effectiveCwd = options.cwd ?? ctx.cwd;
-  const configCwd = options.configCwd ?? effectiveCwd;
-
+): Promise<PreparedSystemPrompt> {
   const env = await detectEnv(options.pi, effectiveCwd);
 
   // Get parent system prompt for append-mode agents, without the sections the
@@ -114,8 +110,6 @@ export async function runAgent(
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
 
   const isolated = agentConfig?.isolated ?? options.isolated;
-  const extensions = isolated ? false : config.extensions;
-  const excludeExtensions = isolated ? undefined : config.excludeExtensions;
   const skills = isolated ? false : config.skills;
 
   if (Array.isArray(skills)) {
@@ -154,6 +148,37 @@ export async function runAgent(
   }
 
   const noSkills = skills === false || Array.isArray(skills);
+  return { systemPrompt, toolNames, noSkills };
+}
+
+interface RunnerResourceContext {
+  loader: DefaultResourceLoader;
+  agentDir: string;
+  sessionSettingsManager: SettingsManager;
+  nestedCallGate: NestedCallGate;
+  extNames: Set<string>;
+  narrowing: Map<string, Set<string>>;
+  mcpToolPatterns: string[] | undefined;
+  noExtensions: boolean;
+}
+
+/**
+ * SRP Phase 2: Create resource loader, compute extension filters, and report misconfiguration warnings.
+ */
+async function createRunnerResourceLoader(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  agentConfig: AgentConfig | undefined,
+  config: ReturnType<typeof getConfig>,
+  configCwd: string,
+  effectiveCwd: string,
+  systemPrompt: string,
+  noSkills: boolean,
+  options: RunOptions,
+): Promise<RunnerResourceContext> {
+  const isolated = agentConfig?.isolated ?? options.isolated;
+  const extensions = isolated ? false : config.extensions;
+  const excludeExtensions = isolated ? undefined : config.excludeExtensions;
   const agentDir = getAgentDir();
 
   const { extNames, narrowing } = parseExtSelectors(
@@ -281,6 +306,49 @@ export async function runAgent(
     });
   }
 
+  return {
+    loader,
+    agentDir,
+    sessionSettingsManager,
+    nestedCallGate,
+    extNames,
+    narrowing,
+    mcpToolPatterns,
+    noExtensions,
+  };
+}
+
+interface SessionToolLoadout {
+  model: any;
+  thinkingLevel: any;
+  nestedTools: any[];
+  askTools: any[];
+  structuredTools: any[];
+  structuredCapture: ReturnType<typeof createStructuredCapture> | undefined;
+  disallowedSet: Set<string> | undefined;
+  readmitToolNames: Set<string>;
+  sessionTools: string[] | undefined;
+  sessionExcludeTools: string[] | undefined;
+}
+
+/**
+ * SRP Phase 3: Model resolution, custom tools creation (nested, ask, structured), and tool admission calculation.
+ */
+function buildSessionToolLoadout(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  agentConfig: AgentConfig | undefined,
+  loader: DefaultResourceLoader,
+  settingsManager: SettingsManager,
+  toolNames: string[],
+  extNames: Set<string>,
+  mcpToolPatterns: string[] | undefined,
+  noExtensions: boolean,
+  configCwd: string,
+  options: RunOptions,
+): SessionToolLoadout {
+  const isolated = agentConfig?.isolated ?? options.isolated;
+
   let model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
@@ -324,10 +392,7 @@ export async function runAgent(
         configCwd,
       })
     : [];
-  // ask_parent/answer_subagent need only an owner, never delegation headroom:
-  // every non-isolated subagent gets them, at any depth, with or without an
-  // allowlist — unless its own disallowedTools names them. Only when the full
-  // delegation suite is present are they already inside nestedTools.
+
   const askTools = options.nestedRuntime && !isolated && !nestedTools.some((tool: any) => tool.name === "ask_parent")
     ? createAskAnswerTools({
         manager: options.nestedRuntime.manager,
@@ -349,14 +414,7 @@ export async function runAgent(
 
   const builtinToolNameSet = new Set(toolNames);
 
-  // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing: with
-  // no tool it can only narrate calls it cannot make. Extension tools register after
-  // spawn (MCP once its servers connect), so they count as possible whenever an
-  // extension they could come from loaded, or any `mcp__` entry can reach a bridge.
-  //
-  // A resume reopens an existing conversation: the config may have changed since
-  // its first run, and refusing then would strand every revive path (`/agents`,
-  // pause-continue, `Agent({resume})`) without the session it was asked to reopen.
+  // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing
   if (options.resumeSessionFile === undefined) {
     const loadedNames = new Set(
       loader
@@ -366,7 +424,6 @@ export async function runAgent(
     );
     const unrecognized = agentConfig?.builtinToolNames?.filter((n) => !BUILTIN_TOOL_NAMES.includes(n)) ?? [];
     const unmatched = [...extNames].filter((n) => !loadedNames.has(n));
-    // `extensions: false` and `isolated` load nothing, so `loadedNames` is empty then.
     const extensionToolsPossible =
       loadedNames.size > 0 &&
       (extNames.size === 0 || unmatched.length < extNames.size || !!mcpToolPatterns);
@@ -414,14 +471,60 @@ export async function runAgent(
     sessionExcludeTools = [...denyTools];
   }
 
+  return {
+    model,
+    thinkingLevel,
+    nestedTools,
+    askTools,
+    structuredTools,
+    structuredCapture,
+    disallowedSet,
+    readmitToolNames,
+    sessionTools,
+    sessionExcludeTools,
+  };
+}
+
+interface CreateSessionParams {
+  ctx: ExtensionContext;
+  type: SubagentType;
+  agentConfig: AgentConfig | undefined;
+  effectiveCwd: string;
+  agentDir: string;
+  loader: DefaultResourceLoader;
+  sessionSettingsManager: SettingsManager;
+  model: any;
+  thinkingLevel: any;
+  sessionTools: string[] | undefined;
+  sessionExcludeTools: string[] | undefined;
+  customTools: any[];
+  noExtensions: boolean;
+  nestedCallGate: NestedCallGate;
+  toolNames: string[];
+  disallowedSet: Set<string> | undefined;
+  extNames: Set<string>;
+  narrowing: Map<string, Set<string>>;
+  mcpToolPatterns: string[] | undefined;
+  readmitToolNames: Set<string>;
+  options: RunOptions;
+}
+
+/**
+ * SRP Phase 4: Session creation, naming, extension binding, and scope installation.
+ */
+async function createAndBindSession(params: CreateSessionParams): Promise<AgentSession> {
+  const {
+    ctx, type, agentConfig, effectiveCwd, agentDir, loader, sessionSettingsManager,
+    model, thinkingLevel, sessionTools, sessionExcludeTools, customTools,
+    noExtensions, nestedCallGate, toolNames, disallowedSet, extNames,
+    narrowing, mcpToolPatterns, readmitToolNames, options,
+  } = params;
+
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
-  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
+  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? sessionSettingsManager.getSessionDir?.();
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : getRememberAgents());
   const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const sessionManager = options.resumeSessionFile
-    // Reopening an existing conversation: the file already carries its own
-    // header (cwd, parent) and history, so none of the create-time options
-    // apply. `sessionDir` still matters for a later /new or /branch off it.
     ? reopenSession(options.resumeSessionFile, parentSessionFile, configuredSessionDir ?? defaultSessionDir)
     : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
@@ -442,7 +545,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...askTools, ...structuredTools],
+    customTools,
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
@@ -469,6 +572,7 @@ export async function runAgent(
   });
 
   if (!noExtensions) {
+    const isolated = agentConfig?.isolated ?? options.isolated;
     installExtensionToolScope(session, {
       loader,
       toolNames,
@@ -482,7 +586,20 @@ export async function runAgent(
   }
 
   options.onSessionCreated?.(session);
+  return session;
+}
 
+/**
+ * SRP Phase 5: Execute prompt, handle observers, signal forwarding, structured output retries, and result assembly.
+ */
+async function executeAgentPrompt(
+  ctx: ExtensionContext,
+  session: AgentSession,
+  prompt: string | undefined,
+  type: SubagentType,
+  options: RunOptions,
+  structuredCapture: ReturnType<typeof createStructuredCapture> | undefined,
+): Promise<RunResult> {
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
 
   const collector = collectResponseText(session);
@@ -533,4 +650,76 @@ export async function runAgent(
     ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
     ...(structuredRetried ? { structuredRetried } : {}),
   };
+}
+
+/**
+ * Execute a subagent with full lifecycle orchestration.
+ * Opts into @earendil-works/pi-durable if options.durable or agentConfig.durable is set.
+ */
+export async function runAgent(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  prompt: string | undefined,
+  options: RunOptions,
+): Promise<RunResult> {
+  if (prompt === undefined && options.resumeSessionFile === undefined) {
+    throw new Error("runAgent requires a prompt unless resumeSessionFile is set");
+  }
+
+  const agentConfig = getAgentConfig(type);
+
+  if (options.durable ?? agentConfig?.durable) {
+    return runDurableAgent(ctx, type, prompt, options);
+  }
+
+  const effectiveCwd = options.cwd ?? ctx.cwd;
+  const configCwd = options.configCwd ?? effectiveCwd;
+  const config = getConfig(type);
+
+  // 1. Prepare agent system prompt, memory, and skills
+  const { systemPrompt, toolNames, noSkills } = await prepareAgentSystemPrompt(
+    ctx, type, agentConfig, config, effectiveCwd, configCwd, options,
+  );
+
+  // 2. Setup resource loader, extension overrides, and configuration warnings
+  const resourceContext = await createRunnerResourceLoader(
+    ctx, type, agentConfig, config, configCwd, effectiveCwd, systemPrompt, noSkills, options,
+  );
+
+  // 3. Resolve model and compute tool admission loadout
+  const toolLoadout = buildSessionToolLoadout(
+    ctx, type, agentConfig, resourceContext.loader, resourceContext.sessionSettingsManager,
+    toolNames, resourceContext.extNames, resourceContext.mcpToolPatterns, resourceContext.noExtensions,
+    configCwd, options,
+  );
+
+  // 4. Instantiate session, name, bind extensions, and apply security gates
+  const session = await createAndBindSession({
+    ctx,
+    type,
+    agentConfig,
+    effectiveCwd,
+    agentDir: resourceContext.agentDir,
+    loader: resourceContext.loader,
+    sessionSettingsManager: resourceContext.sessionSettingsManager,
+    model: toolLoadout.model,
+    thinkingLevel: toolLoadout.thinkingLevel,
+    sessionTools: toolLoadout.sessionTools,
+    sessionExcludeTools: toolLoadout.sessionExcludeTools,
+    customTools: [...toolLoadout.nestedTools, ...toolLoadout.askTools, ...toolLoadout.structuredTools],
+    noExtensions: resourceContext.noExtensions,
+    nestedCallGate: resourceContext.nestedCallGate,
+    toolNames,
+    disallowedSet: toolLoadout.disallowedSet,
+    extNames: resourceContext.extNames,
+    narrowing: resourceContext.narrowing,
+    mcpToolPatterns: resourceContext.mcpToolPatterns,
+    readmitToolNames: toolLoadout.readmitToolNames,
+    options,
+  });
+
+  // 5. Execute agent loop and return observed results
+  return executeAgentPrompt(
+    ctx, session, prompt, type, options, toolLoadout.structuredCapture,
+  );
 }

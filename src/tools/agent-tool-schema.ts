@@ -14,7 +14,7 @@ export function getModelLabelFromConfig(model: string): string {
 }
 
 /** First sentence of an agent description — for the compact type list. */
-export function firstSentence(text: string): string {
+function firstSentence(text: string): string {
   const match = text.match(/^.*?[.!?](?=\s|$)/s);
   return (match ? match[0] : text).replace(/\s+/g, " ").trim();
 }
@@ -50,7 +50,7 @@ const scheduleParamShape = {
   ),
 };
 
-export function buildScheduleParam(schedulingEnabled: boolean): Partial<typeof scheduleParamShape> {
+function buildScheduleParam(schedulingEnabled: boolean): Partial<typeof scheduleParamShape> {
   return schedulingEnabled ? scheduleParamShape : {};
 }
 

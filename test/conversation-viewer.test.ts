@@ -566,9 +566,8 @@ describe("ConversationViewer", () => {
 
       expect(out).toContain("Two");
       expect(out).not.toContain("One");
-      // The component rebuilds its Markdown on `updateContent` — one initial,
-      // one for the new text — instead of mutating a shared instance.
-      expect(markdownConstructions).toBe(2);
+      // In Pi 1.5.0+, AssistantMessageComponent reuses its Markdown slot via setText()
+      expect(markdownConstructions).toBe(1);
     });
 
     it("renders Markdown to fit, so the overwidth clamp never has to cut it", () => {

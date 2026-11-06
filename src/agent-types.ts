@@ -107,7 +107,7 @@ export function getAgentConfigIn(registry: Map<string, AgentConfig>, name: strin
 }
 
 /** Check if a type is valid and enabled (case-insensitive) in a registry. */
-export function isValidTypeIn(registry: Map<string, AgentConfig>, type: string): boolean {
+function isValidTypeIn(registry: Map<string, AgentConfig>, type: string): boolean {
   const key = resolveKeyIn(registry, type);
   if (!key) return false;
   return registry.get(key)?.enabled !== false;
