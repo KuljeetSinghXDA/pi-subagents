@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.11.061] - 2026-11-06
+
 ### Added
 - **Subagents support transactional, crash-resilient execution with `@earendil-works/pi-durable`**. Setting `durable: true` in agent frontmatter or invocation options runs the subagent via the durable harness backed by memory or transactional storage, avoiding ad-hoc file recovery and orphaned states.
 
