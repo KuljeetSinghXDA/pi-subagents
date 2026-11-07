@@ -90,4 +90,37 @@ describe("bridgePiToolToDurableTool", () => {
     expect(result.isError).toBe(true);
     expect(result.output).toEqual([{ type: "text", text: "Network timeout contacting MCP service" }]);
   });
+
+  it("passes both toolCall and args to beforeToolCall", async () => {
+    let capturedHookContext: any;
+    const testTool: ExecutablePiTool = {
+      name: "bash",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"],
+      },
+      execute: async (_callId, params) => ({
+        content: [{ type: "text", text: `Executed ${params.command}` }],
+      }),
+    };
+
+    const durableTool = bridgePiToolToDurableTool(testTool, {
+      beforeToolCall: async (context) => {
+        capturedHookContext = context;
+      },
+    });
+
+    const mockApi: any = { output: vi.fn(), callId: "call-123" };
+    const inputArgs = { command: "ls -la" };
+    const result = await durableTool.execute(inputArgs, mockApi, BACKGROUND_CONTEXT);
+
+    expect(result.isError).toBe(false);
+    expect(capturedHookContext).toBeDefined();
+    expect(capturedHookContext.args).toEqual(inputArgs);
+    expect(capturedHookContext.toolCall).toBeDefined();
+    expect(capturedHookContext.toolCall.name).toBe("bash");
+    expect(capturedHookContext.toolCall.arguments).toEqual(inputArgs);
+    expect(capturedHookContext.toolCall.id).toBe("call-123");
+  });
 });

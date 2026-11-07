@@ -40,8 +40,8 @@ export function stripShellZones(line: string): string {
 }
 
 export function computeLastMessageSignature(session: AgentSession): string {
-  const messages = session.messages;
-  const last = messages[messages.length - 1];
+  const streaming = session.state?.streamingMessage;
+  const last = (streaming?.role === "assistant" ? streaming : undefined) ?? session.messages[session.messages.length - 1];
   if (!last) return "empty";
   const content = (last as { content?: unknown }).content;
   if (typeof content === "string") return `s:${content.length}`;

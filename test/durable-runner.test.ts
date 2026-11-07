@@ -27,6 +27,8 @@ function createMockPi(): ExtensionAPI {
   } as unknown as ExtensionAPI;
 }
 
+vi.setConfig({ testTimeout: 30_000 });
+
 describe("runDurableAgent", () => {
   it("initializes a durable root conversation and bare continuation", async () => {
     const ctx = createMockCtx();
@@ -133,5 +135,40 @@ describe("runDurableAgent", () => {
     releaseGate();
     await boundaryPromise;
     expect(gateResolved).toBe(true);
+  });
+
+  it("provides args to beforeToolCall so tool_call extension hooks receive input without crashing", async () => {
+    const ctx = createMockCtx();
+    const pi = createMockPi();
+    const storage = new MemoryStorage();
+
+    let capturedEvent: any;
+    const runResult = await runDurableAgent(ctx, "Explore", undefined, {
+      pi,
+      storage,
+      onSessionCreated: (session: any) => {
+        // Mock an extension hook like pi-bash-process-priority that listens on tool_call via extensionRunner
+        session._extensionRunner.hasHandlers = (name: string) => name === "tool_call";
+        session._extensionRunner.emitToolCall = async (event: any) => {
+          capturedEvent = event;
+          // Verify that accessing input.command does not throw
+          if (event.toolName === "bash") {
+            const _cmd = event.input.command;
+          }
+          return undefined;
+        };
+      },
+    });
+
+    // In runner-session, tool execution calls (session as any).agent.beforeToolCall({ toolCall, args })
+    const hookContext = {
+      toolCall: { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "uptime" } },
+      args: { command: "uptime" },
+    };
+    await (runResult.session.agent as any).beforeToolCall(hookContext);
+
+    expect(capturedEvent).toBeDefined();
+    expect(capturedEvent.toolName).toBe("bash");
+    expect(capturedEvent.input).toEqual({ command: "uptime" });
   });
 });

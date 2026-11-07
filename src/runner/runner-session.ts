@@ -631,7 +631,9 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
     return {
       ...tool,
       execute: async (input: any, api: any, context: any) => {
-        const lastAssistant = [...session.messages].reverse().find((m: any) => m.role === "assistant") as any;
+        const lastAssistant =
+          (session.state?.streamingMessage?.role === "assistant" ? session.state.streamingMessage : undefined) ??
+          ([...session.messages].reverse().find((m: any) => m.role === "assistant") as any);
         const pendingCall = lastAssistant?.content?.find(
           (c: any) =>
             c.type === "toolCall" &&
@@ -641,10 +643,13 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
         const callId = api?.callId ?? pendingCall?.id ?? pendingCall?.toolUseId ?? `tool_${Date.now()}`;
 
         if ((session as any).agent?.beforeToolCall) {
-          await (session as any).agent.beforeToolCall(
-            { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input } },
+          const decision = await (session as any).agent.beforeToolCall(
+            { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input }, args: input },
             options.signal,
           );
+          if (decision?.block) {
+            throw new Error(decision.reason ?? `Tool call blocked: ${tool.name}`);
+          }
         }
         if (options.signal?.aborted) {
           throw new Error("Aborted");
@@ -704,6 +709,20 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
             isError,
             timestamp: Date.now(),
           };
+          if ((session as any).agent?.afterToolCall) {
+            const hookOverride = await (session as any).agent.afterToolCall(
+              {
+                toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input },
+                args: input,
+                result: toolResult,
+                isError,
+              },
+              options.signal,
+            );
+            if (hookOverride?.content) {
+              toolResult.content = hookOverride.content;
+            }
+          }
           session.messages.push(toolResult as any);
           (session as any)._emit?.({ type: "message_start", message: toolResult });
           (session as any)._emit?.({ type: "message_end", message: toolResult });
@@ -718,6 +737,21 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
             isError: true,
             timestamp: Date.now(),
           };
+          if ((session as any).agent?.afterToolCall) {
+            try {
+              await (session as any).agent.afterToolCall(
+                {
+                  toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input },
+                  args: input,
+                  result: toolResult,
+                  isError: true,
+                },
+                options.signal,
+              );
+            } catch {
+              // ignore hook error during exception handling
+            }
+          }
           session.messages.push(toolResult as any);
           (session as any)._emit?.({ type: "message_start", message: toolResult });
           (session as any)._emit?.({ type: "message_end", message: toolResult });
@@ -758,6 +792,8 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
           onActivity: options.onToolActivity,
           beforeToolCall: (context, signal) =>
             (session as any).agent?.beforeToolCall?.(context, signal),
+          afterToolCall: (context, signal) =>
+            (session as any).agent?.afterToolCall?.(context, signal),
           onToolStart: (info) => {
             (session as any)._emit?.({
               type: "tool_execution_start",
@@ -849,8 +885,29 @@ async function executeDurableAgentPrompt(
   let lastStreamError: string | undefined;
   let lastStreamErrorMessage: any | undefined;
 
+  const agentState = (session.agent as any)?._state ?? (session as any).state;
+  if (agentState) {
+    agentState.isStreaming = true;
+    agentState.streamingMessage = undefined;
+  }
+
   let activeAssistantMessage: any;
   let activeText = "";
+
+  function ensureActiveMessage() {
+    if (!activeAssistantMessage) {
+      activeAssistantMessage = {
+        role: "assistant",
+        content: [],
+        timestamp: Date.now(),
+      };
+      if (agentState) {
+        agentState.streamingMessage = activeAssistantMessage;
+      }
+      (session as any)._emit?.({ type: "message_start", message: activeAssistantMessage });
+    }
+    return activeAssistantMessage;
+  }
 
   function handleStreamChunk(event: any) {
     if (!event) return;
@@ -861,18 +918,19 @@ async function executeDurableAgentPrompt(
         content: [],
         timestamp: Date.now(),
       };
-      session.messages.push(activeAssistantMessage);
+      if (agentState) {
+        agentState.streamingMessage = activeAssistantMessage;
+      }
       activeText = "";
       (session as any)._emit?.({ type: "message_start", message: activeAssistantMessage });
-    } else if (event.type === "thinking_delta") {
-      if (!activeAssistantMessage) {
-        activeAssistantMessage = {
-          role: "assistant",
-          content: [],
-          timestamp: Date.now(),
-        };
-        session.messages.push(activeAssistantMessage);
+    } else if (event.type === "thinking_start") {
+      ensureActiveMessage();
+      if (!activeAssistantMessage.content.some((p: any) => p.type === "thinking")) {
+        activeAssistantMessage.content.push({ type: "thinking", thinking: "" });
       }
+      (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
+    } else if (event.type === "thinking_delta") {
+      ensureActiveMessage();
       if (event.partial?.content) {
         activeAssistantMessage.content = [...event.partial.content];
       } else {
@@ -883,17 +941,30 @@ async function executeDurableAgentPrompt(
         }
         thinkingPart.thinking += event.delta ?? "";
       }
-      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
-      options.onTextDelta?.("", activeText);
-    } else if (event.type === "text_delta") {
-      if (!activeAssistantMessage) {
-        activeAssistantMessage = {
-          role: "assistant",
-          content: [],
-          timestamp: Date.now(),
-        };
-        session.messages.push(activeAssistantMessage);
+      if (agentState) {
+        agentState.streamingMessage = activeAssistantMessage;
       }
+      (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
+      options.onTextDelta?.("", activeText);
+    } else if (event.type === "thinking_end") {
+      if (activeAssistantMessage) {
+        const thinkingPart = activeAssistantMessage.content.find((p: any) => p.type === "thinking");
+        if (thinkingPart && typeof event.content === "string") {
+          thinkingPart.thinking = event.content;
+        }
+        if (agentState) {
+          agentState.streamingMessage = activeAssistantMessage;
+        }
+        (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
+      }
+    } else if (event.type === "text_start") {
+      ensureActiveMessage();
+      if (!activeAssistantMessage.content.some((p: any) => p.type === "text")) {
+        activeAssistantMessage.content.push({ type: "text", text: "" });
+      }
+      (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
+    } else if (event.type === "text_delta") {
+      ensureActiveMessage();
       activeText += event.delta ?? "";
       if (event.partial?.content) {
         activeAssistantMessage.content = [...event.partial.content];
@@ -905,10 +976,25 @@ async function executeDurableAgentPrompt(
         }
         textPart.text = activeText;
       }
-      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
+      if (agentState) {
+        agentState.streamingMessage = activeAssistantMessage;
+      }
+      (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
       options.onTextDelta?.(event.delta ?? "", activeText);
+    } else if (event.type === "text_end") {
+      if (activeAssistantMessage) {
+        const textPart = activeAssistantMessage.content.find((p: any) => p.type === "text");
+        if (textPart && typeof event.content === "string") {
+          textPart.text = event.content;
+        }
+        if (agentState) {
+          agentState.streamingMessage = activeAssistantMessage;
+        }
+        (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
+      }
     } else if (event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end") {
-      if (activeAssistantMessage && event.partial?.content) {
+      ensureActiveMessage();
+      if (event.partial?.content) {
         activeAssistantMessage.content = [...event.partial.content];
       }
       if (event.type === "toolcall_start") {
@@ -922,13 +1008,24 @@ async function executeDurableAgentPrompt(
           });
         }
       }
-      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
+      if (agentState) {
+        agentState.streamingMessage = activeAssistantMessage;
+      }
+      (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
     } else if (event.type === "done") {
       if (activeAssistantMessage && event.message) {
         Object.assign(activeAssistantMessage, event.message);
       }
-      (session as any)._emit?.({ type: "message_end", message: event.message ?? activeAssistantMessage });
+      const finalMsg = event.message ?? activeAssistantMessage;
+      if (finalMsg && !session.messages.includes(finalMsg)) {
+        session.messages.push(finalMsg);
+      }
+      if (agentState) {
+        agentState.streamingMessage = undefined;
+      }
+      (session as any)._emit?.({ type: "message_end", message: finalMsg });
       (session as any)._emit?.({ type: "turn_end" });
+      activeAssistantMessage = undefined;
     }
   }
 
@@ -1245,6 +1342,10 @@ async function executeDurableAgentPrompt(
     run.unsubscribe();
     collector.unsubscribe();
     options.signal?.removeEventListener("abort", abortListener);
+    if (agentState) {
+      agentState.isStreaming = false;
+      agentState.streamingMessage = undefined;
+    }
     try {
       await harness.close(baseContext);
     } catch {

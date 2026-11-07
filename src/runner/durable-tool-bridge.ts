@@ -21,6 +21,7 @@ const REPLAY_SAFE_TOOLS = new Set([
 export interface BridgeToolOptions {
   onActivity?: (activity: ToolActivity) => void;
   beforeToolCall?: (context: any, signal?: AbortSignal) => Promise<any> | any;
+  afterToolCall?: (context: any, signal?: AbortSignal) => Promise<any> | any;
   onToolStart?: (info: { toolName: string; toolCallId: string; args: any }) => void;
   onToolUpdate?: (info: { toolName: string; toolCallId: string; args: any; partialResult: any }) => void;
   onToolResult?: (result: any) => void;
@@ -63,10 +64,13 @@ export function bridgePiToolToDurableTool(
       const callId = (api as any)?.callId ?? `call-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
       if (options.beforeToolCall) {
-        await options.beforeToolCall(
-          { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args } },
+        const decision = await options.beforeToolCall(
+          { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args }, args },
           options.signal,
         );
+        if (decision?.block) {
+          throw new Error(decision.reason ?? `Tool call blocked: ${tool.name}`);
+        }
       }
       if (options.signal?.aborted) {
         throw new Error("Aborted");
@@ -137,18 +141,34 @@ export function bridgePiToolToDurableTool(
                 ? (result as any).output
                 : [];
 
+        let finalOutput = output;
+        if (options.afterToolCall) {
+          const hookResult = await options.afterToolCall(
+            {
+              toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args },
+              args,
+              result: { content: output, details: result?.details },
+              isError: result?.isError === true,
+            },
+            options.signal,
+          );
+          if (hookResult?.content) {
+            finalOutput = hookResult.content;
+          }
+        }
+
         options.onToolResult?.({
           role: "toolResult",
           toolName: tool.name,
           toolCallId: callId,
-          content: output,
+          content: finalOutput,
           details: result?.details,
           isError: result?.isError === true,
           timestamp: Date.now(),
         });
 
         return {
-          output,
+          output: finalOutput,
           isError: result?.isError === true,
           details: result?.details as JsonValue,
         };
