@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
-import { type AgentActivity, AgentWidget } from "../src/ui/agent-widget.js";
 import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
 
@@ -62,16 +61,6 @@ function makeRecord(): AgentRecord {
     } as unknown as AgentRecord["session"],
     lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
     compactionCount: 0,
-  };
-}
-
-function makeActivity(): AgentActivity {
-  return {
-    activeTools: new Map(),
-    toolUses: 0,
-    responseText: "",
-    turnCount: 1,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
   };
 }
 
@@ -147,38 +136,6 @@ describe("custom agent color runtime surfaces", () => {
       expect(uncolored.trimEnd()).toBe(`▸ <toolTitle>*${DISPLAY_NAME}*</toolTitle>  <muted>Review this change</muted>`);
     } finally {
       await handlers.get("session_shutdown")?.({}, { hasUI: false, ui: {} });
-    }
-  });
-
-  it("renders the above-editor Agent widget with the display name and color", () => {
-    const record = makeRecord();
-    const widget = new AgentWidget(
-      { listAgents: () => [record] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
-      new Map([[record.id, makeActivity()]]),
-      () => "all",
-    );
-    let factory: WidgetFactory | undefined;
-    let placement: string | undefined;
-    widget.setUICtx({
-      setStatus: vi.fn(),
-      setWidget: (_key, content, options) => {
-        if (typeof content === "function") factory = content as WidgetFactory;
-        placement = options?.placement;
-      },
-    });
-
-    try {
-      widget.update();
-      const output = factory?.(
-        { terminal: { columns: 120 }, requestRender: vi.fn() },
-        theme,
-      ).render().join("\n");
-
-      expect(placement).toBe("aboveEditor");
-      expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
-    } finally {
-      widget.dispose();
     }
   });
 

@@ -28,6 +28,7 @@ vi.mock("../src/mention-clone.js", () => ({ runMentionClone: vi.fn() }));
 import { getDefaultMaxTurns, resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { runMentionClone } from "../src/mention-clone.js";
+import { resolveEffectiveMaxTurns } from "../src/runner/runner-settings.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -460,21 +461,19 @@ describe("mentioning an agent that has never run", () => {
 
   });
 
-  it("shows the turn limit it will actually be held to (#181)", async () => {
+  it("resolves the turn limit it will actually be held to (#181)", async () => {
     // The spawn passes no maxTurns on purpose (see the test above), so the
-    // tracker has to resolve the same limit runAgent will enforce — otherwise
-    // the row reads `↻1` where the Agent tool would read `↻1≤9`.
+    // tracker has to resolve the same limit runAgent will enforce.
     const prevMax = getDefaultMaxTurns();
     try {
       const { lifecycle } = bootDirect({ defaultMaxTurns: 9 });
       heldRun(fakeSession());
-      let factory: any;
       const uiCtx = ctx({
         hasUI: true,
         ui: {
           setStatus: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
           onTerminalInput: vi.fn(() => vi.fn()), getEditorText: vi.fn(() => ""), custom: vi.fn(),
-          setWidget: vi.fn((key: string, content: any) => { if (key === "agents" && content) factory = content; }),
+          setWidget: vi.fn(),
         },
       });
       await lifecycle.get("session_start")({}, uiCtx);
@@ -482,9 +481,7 @@ describe("mentioning an agent that has never run", () => {
       await lifecycle.get("input")({ type: "input", text: "@explore go", source: "interactive" }, uiCtx);
       await flush();
 
-      const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
-      const lines = factory({ terminal: { columns: 200 }, requestRender: vi.fn() }, theme).render().join("\n");
-      expect(lines).toContain("≤9");
+      expect(resolveEffectiveMaxTurns("explore")).toBe(9);
     } finally {
       setDefaultMaxTurns(prevMax);
     }

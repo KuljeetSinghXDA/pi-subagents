@@ -1,7 +1,9 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
+import { bridgePiToolToDurableTool } from "../src/runner/durable-tool-bridge.js";
 
 function createMockCtx(): ExtensionContext {
   return {
@@ -45,5 +47,52 @@ describe("Durable runner with extensions and MCP tools", () => {
     // Verify session has active tool names available
     const activeToolNames = result.session.getActiveToolNames();
     expect(Array.isArray(activeToolNames)).toBe(true);
+  });
+
+  it("bridges custom extension and MCP tools, delivering lifecycle events and formatted results", async () => {
+    const activities: any[] = [];
+    const events: any[] = [];
+    const mockTool = {
+      name: "mcp__fixture__echo",
+      description: "Echo tool",
+      parameters: { type: "object", properties: { message: { type: "string" } } },
+      execute: vi.fn(async (_callId, params: any, _signal, update) => {
+        update?.("streaming update");
+        return { content: [{ type: "text", text: `echo: ${params.message}` }] };
+      }),
+    };
+
+    const sessionMock: any = {
+      messages: [],
+      _emit: (e: any) => events.push(e),
+      agent: {},
+    };
+
+    const durableTool = bridgePiToolToDurableTool(mockTool as any, {
+      onActivity: (act) => activities.push(act),
+      onToolStart: (info) => sessionMock._emit({ type: "tool_execution_start", ...info }),
+      onToolUpdate: (info) => sessionMock._emit({ type: "tool_execution_update", ...info }),
+      onToolResult: (res) => {
+        sessionMock.messages.push(res);
+        sessionMock._emit({ type: "tool_execution_end", ...res });
+      },
+    });
+
+    const mockApi: any = { output: vi.fn() };
+    const res = await durableTool.execute({ message: "test input" }, mockApi, BACKGROUND_CONTEXT);
+
+    expect(mockTool.execute).toHaveBeenCalledTimes(1);
+    expect(res.isError).toBe(false);
+    expect(res.output).toEqual([{ type: "text", text: "echo: test input" }]);
+    expect(activities).toHaveLength(2);
+    expect(activities[0].type).toBe("start");
+    expect(activities[1].type).toBe("end");
+    expect(events.map(e => e.type)).toEqual([
+      "tool_execution_start",
+      "tool_execution_update",
+      "tool_execution_end",
+    ]);
+    expect(sessionMock.messages).toHaveLength(1);
+    expect(sessionMock.messages[0].content).toEqual([{ type: "text", text: "echo: test input" }]);
   });
 });

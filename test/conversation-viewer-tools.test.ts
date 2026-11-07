@@ -131,4 +131,72 @@ describe("chat transcript tool blocks", () => {
     expect(lines()).not.toContain("[Result]");
     expect(lines()).not.toContain("Operation aborted");
   });
+
+  it("renders MCP tool calls with arguments and folds result cleanly", () => {
+    const mcpCall = assistant([
+      {
+        type: "toolCall",
+        id: "call-mcp-1",
+        name: "mcp__github__search_issues",
+        arguments: { query: "is:open label:bug", limit: 5 },
+      },
+    ]);
+    const session = mockSession([
+      mcpCall,
+      {
+        role: "toolResult",
+        toolName: "mcp__github__search_issues",
+        toolCallId: "call-mcp-1",
+        content: [{ type: "text", text: "Found 2 matching issues" }],
+        isError: false,
+      },
+    ]);
+    const { lines } = build(session);
+    const rendered = lines();
+
+    expect(rendered).toContain("mcp__github__search_issues");
+    expect(rendered).toContain("query");
+    expect(rendered).toContain("Found 2 matching issues");
+    expect(rendered).not.toContain("[Result]");
+    expect(rendered).not.toContain("[object Object]");
+  });
+
+  it("renders extension tool calls using custom renderCall and renderResult", () => {
+    const extCall = assistant([
+      {
+        type: "toolCall",
+        id: "call-ext-1",
+        name: "custom_analyzer",
+        arguments: { target: "src/index.ts" },
+      },
+    ]);
+    const customDefinition = {
+      renderCall(args: any) {
+        return { render: () => [`[CUSTOM_CALL: ${args.target}]`], invalidate: () => {} };
+      },
+      renderResult(result: any) {
+        return { render: () => [`[CUSTOM_RESULT: ${result.content?.[0]?.text}]`], invalidate: () => {} };
+      },
+    };
+    const session = mockSession(
+      [
+        extCall,
+        {
+          role: "toolResult",
+          toolName: "custom_analyzer",
+          toolCallId: "call-ext-1",
+          content: [{ type: "text", text: "Analysis: 0 defects" }],
+          isError: false,
+        },
+      ],
+      { custom_analyzer: customDefinition },
+    );
+    const { lines } = build(session);
+    const rendered = lines();
+
+    expect(rendered).toContain("[CUSTOM_CALL: src/index.ts]");
+    expect(rendered).toContain("[CUSTOM_RESULT: Analysis: 0 defects]");
+    expect(rendered).not.toContain("[Result]");
+    expect(rendered).not.toContain("[object Object]");
+  });
 });

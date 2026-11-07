@@ -230,14 +230,15 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
   });
 
-  it("hides nested child records from the coordinator fleet", () => {
+  it("shows nested child records in the coordinator fleet with tree branches", () => {
     const h = harness([
       makeRecord({ id: "top", description: "top-level" }),
       makeRecord({ id: "nested", description: "nested-child", parentAgentId: "top" }),
     ]);
     const output = h.render().join("\n");
     expect(output).toContain("top-level");
-    expect(output).not.toContain("nested-child");
+    expect(output).toContain("nested-child");
+    expect(output).toContain("└─");
   });
 
   it("activates on ↓ at an empty prompt, consuming the key", () => {
@@ -603,12 +604,10 @@ describe("FleetList navigation", () => {
     await hub;
     await h.settleBar();
 
-    // A fresh agent after close must inherit the pre-hub dismissal, not a
-    // drain-reset bar: the dismissal outlives the hub, exactly as promised.
+    // Adding an agent re-expands the fleet if previously closed
     agents.push(makeRecord({ id: "a3" }));
     h.fleet.update();
-    expect(h.render()).toEqual([]);
-    expect(h.press(DOWN)).toEqual({ consume: true }); // still recallable
+    expect(h.render().some(l => l.includes("Sleep then report 1"))).toBe(true);
   });
 
   it("ignores all input while disabled and hides the widget", () => {
@@ -748,11 +747,11 @@ describe("FleetList rendering", () => {
   });
 
   it("collapses overflow into a '↓ N more' indicator", () => {
-    const agents = Array.from({ length: 8 }, (_, i) =>
+    const agents = Array.from({ length: 13 }, (_, i) =>
       makeRecord({ id: `a${i}`, description: `report ${i}` }));
     const h = harness(agents);
     const lines = h.render(120);
-    // 8 agents, cap 5 visible → "↓ 3 more"
+    // 13 agents, cap 10 visible → "↓ 3 more"
     expect(lines.some(l => l.includes("↓ 3 more"))).toBe(true);
   });
 
@@ -761,7 +760,7 @@ describe("FleetList rendering", () => {
     expect(one.at(-1)).toBe("");
     expect(one.at(-2)).toContain("only agent");
 
-    const many = harness(Array.from({ length: 8 }, (_, i) =>
+    const many = harness(Array.from({ length: 13 }, (_, i) =>
       makeRecord({ id: `a${i}`, description: `report ${i}` }))).render(120);
     expect(many.at(-1)).toBe("");
     expect(many.at(-2)).toContain("↓ 3 more");
@@ -1288,5 +1287,85 @@ describe("FleetList dock coordination (pi-bash-process-priority)", () => {
     } finally {
       delete (globalThis as any)[SHARED_DOCK_COORDINATOR_KEY];
     }
+  });
+});
+
+describe("FleetList Claude Code nested subagents & auto-expand", () => {
+  it("renders multi-depth nested subagents with tree connectors", () => {
+    const parent = makeRecord({ id: "parent-1", description: "Orchestrator", startedAt: 100 });
+    const child1 = makeRecord({ id: "child-1", description: "Worker 1", parentAgentId: "parent-1", startedAt: 200 });
+    const child2 = makeRecord({ id: "child-2", description: "Worker 2", parentAgentId: "parent-1", startedAt: 300 });
+    const grandchild = makeRecord({ id: "grandchild-1", description: "Subworker", parentAgentId: "child-1", startedAt: 250 });
+
+    const h = harness([parent, child1, child2, grandchild]);
+    const lines = h.render(120);
+
+    const parentLine = lines.find(l => l.includes("Orchestrator"))!;
+    const child1Line = lines.find(l => l.includes("Worker 1"))!;
+    const child2Line = lines.find(l => l.includes("Worker 2"))!;
+    const grandchildLine = lines.find(l => l.includes("Subworker"))!;
+
+    expect(parentLine).toBeDefined();
+    // child1 is middle child under parent-1: ├─
+    expect(child1Line).toContain("├─");
+    // child2 is last child under parent-1: └─
+    expect(child2Line).toContain("└─");
+    // grandchild under child-1: indented further with └─
+    expect(grandchildLine).toContain("└─");
+    expect(grandchildLine.indexOf("└─")).toBeGreaterThan(child1Line.indexOf("├─"));
+  });
+
+  it("auto-expands when an agent is added while dismissed", () => {
+    const agents = [makeRecord({ id: "a1", description: "Agent 1" })];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+    expect(h.render()).toEqual([]);
+
+    // Add a new agent
+    agents.push(makeRecord({ id: "a2", description: "Agent 2" }));
+    h.fleet.update();
+
+    // Bar auto-expands
+    const lines = h.render();
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.some(l => l.includes("Agent 2"))).toBe(true);
+  });
+
+  it("auto-expands when an agent finishes while dismissed", () => {
+    const a1 = makeRecord({ id: "a1", description: "Agent 1" });
+    const a2 = makeRecord({ id: "a2", description: "Agent 2" });
+    const agents = [a1, a2];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+    expect(h.render()).toEqual([]);
+
+    // Agent finishes
+    a1.status = "completed" as any;
+    a1.completedAt = Date.now();
+    h.fleet.onAgentFinished("a1");
+
+    // Bar auto-expands
+    const lines = h.render();
+    expect(lines.length).toBeGreaterThan(0);
+  });
+
+  it("refuses pause on nested child subagents with a warning notification", () => {
+    const pauseFn = vi.fn();
+    const resumeFn = vi.fn();
+    const parent = makeRecord({ id: "parent-1", description: "Orchestrator", startedAt: 100 });
+    const child = makeRecord({ id: "child-1", description: "Worker", parentAgentId: "parent-1", startedAt: 200 });
+
+    const h = harness([parent, child]);
+    h.fleet.setLifecycleActions({ pause: pauseFn, resume: resumeFn });
+
+    h.press(DOWN); // main
+    h.press(DOWN); // parent-1
+    h.press(DOWN); // child-1
+    h.press("p");
+
+    expect(pauseFn).not.toHaveBeenCalled();
+    expect(h.notices().some(n => n.includes("Nested subagents are managed by their parent agent"))).toBe(true);
   });
 });

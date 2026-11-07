@@ -113,15 +113,6 @@ export type UIStyle = 'pi' | 'claude';
 export type ViewerStyle = 'chat' | 'compact';
 
 /**
- * Display mode for the persistent above-editor agent widget.
- * - `all`: show every agent (foreground + background).
- * - `background`: hide foreground agents (they already render inline as the
- *   Agent tool result, #118); show background/queued/scheduled/RPC.
- * - `off`: hide the widget entirely.
- */
-export type WidgetMode = 'all' | 'background' | 'off';
-
-/**
  * How `@handle message` starts an agent that is not already running.
  * - `model`: inject Claude Code's `agent_mention` reminder and let the main
  *   model spawn it with the `Agent` tool, which is what Claude Code does.

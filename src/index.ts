@@ -117,7 +117,6 @@ import type {
   NotificationDetails,
   UIStyle,
   ViewerStyle,
-  WidgetMode,
 } from "./types.js";
 import {
   type AgentActivity,
@@ -248,7 +247,13 @@ export default function (pi: ExtensionAPI) {
     const dispatch = resolveSpawnType(type);
     if (!dispatch.ok) throw new Error(dispatch.message);
     const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns));
-    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks });
+    const origOnSessionCreated = options?.onSessionCreated;
+    const onSessionCreated = (session: any) => {
+      origOnSessionCreated?.(session);
+      fleet.ensureTimer();
+      fleet.update();
+    };
+    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks, onSessionCreated });
     agentActivity.set(id, state);
     return id;
   };
@@ -304,10 +309,7 @@ export default function (pi: ExtensionAPI) {
   function getViewerStyle(): ViewerStyle { return viewerStyle; }
   function setViewerStyle(s: ViewerStyle): void { viewerStyle = s; fleet.update(); }
 
-  let widgetMode: WidgetMode = "background";
-  function getWidgetMode(): WidgetMode { return widgetMode; }
-  widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled, getUIStyle);
-  function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
+  widget = new AgentWidget(manager, agentActivity, isShowCostEnabled, isShowModelEnabled, getUIStyle);
 
   const foregroundHandoffs = new Map<string, () => void>();
   const handoff = createHandoffWatcher(pi, manager, foregroundHandoffs, widget, () => fleet);
@@ -416,7 +418,6 @@ export default function (pi: ExtensionAPI) {
       setFleetView: setFleetViewEnabled,
       setAgentMentions: setAgentMentionMode,
       setRememberAgents,
-      setWidgetMode,
       setOutputTranscript: setOutputTranscriptDefault,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setWorkflowsEnabled,
@@ -567,8 +568,6 @@ export default function (pi: ExtensionAPI) {
     setDisableDefaultAgents,
     getToolDescriptionMode,
     setToolDescriptionMode,
-    getWidgetMode,
-    setWidgetMode,
   };
 
   const workflowMenuDeps: WorkflowMenuDeps = {

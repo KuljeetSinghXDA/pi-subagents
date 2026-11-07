@@ -15,7 +15,7 @@
 
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentRecordName } from "../agent-color.js";
-import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import type { AgentManager } from "../agent-manager.js";
 import type { AgentRecord, UIStyle, ViewerStyle } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import type { WorkflowRunControls } from "./agent-hub.js";
@@ -27,7 +27,7 @@ import type { WorkflowDialogSource } from "./workflow-view.js";
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
 /** Max agent rows shown at once; extras collapse into a "↓ N more" indicator. */
-const MAX_AGENT_ROWS = 5;
+const MAX_AGENT_ROWS = 10;
 /** Re-render cadence so elapsed/token stats tick while agents run. */
 const TICK_MS = 200;
 /** How long a finished agent lingers in the list before it drops out. */
@@ -74,7 +74,12 @@ export interface FleetWorkflow {
 }
 
 type MainEntry = { kind: "main" };
-type AgentEntry = { kind: "agent"; record: AgentRecord };
+export type AgentEntry = {
+  kind: "agent";
+  record: AgentRecord;
+  depth?: number;
+  isLastChild?: boolean;
+};
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
 
@@ -135,9 +140,12 @@ export class FleetList {
   /**
    * Set when → dismisses the bar. The list stays hidden — ↓/← recall it (the
    * activators are the "I want the fleet view" keys), and the flag clears when
-   * the roster empties so fresh agent activity shows the bar again on its own.
+   * the roster empties or when agents are added/removed so fresh agent activity
+   * re-expands the bar on its own.
    */
   private dismissed = false;
+  /** Track agent IDs to trigger auto-expansion when agents are added or removed. */
+  private previousAgentIds: Set<string> = new Set();
   /**
    * Set while the agent hub overlay is up. Like `dismissed`, it holds the bar
    * down without touching the roster — but it is the hub's state, not the
@@ -236,10 +244,11 @@ export class FleetList {
   }
 
   /**
-   * Called when an agent finishes. The viewer (if open on it) stays open so the
-   * final output remains readable, and the row lingers in the list — just refresh.
+   * Called when an agent finishes. Re-expands the fleet if dismissed, and refreshes
+   * so the settled agent line is visible.
    */
   onAgentFinished(_id: string): void {
+    this.dismissed = false;
     this.update();
   }
 
@@ -258,6 +267,7 @@ export class FleetList {
     this.tui = undefined;
     this.active = false;
     this.dismissed = false;
+    this.previousAgentIds.clear();
     // Null last so a `viewerClose()` microtask above can't re-register the widget.
     this.ui = undefined;
   }
@@ -270,6 +280,27 @@ export class FleetList {
   /** Re-register/refresh the below-editor widget; clears it when nothing remains. */
   update(): void {
     if (!this.ui) return;
+
+    // Detect added or removed agents to auto-expand the fleet view if previously dismissed.
+    const currentAgentIds = new Set(this.agentRosterEntries().map(e => e.record.id));
+    if (this.dismissed) {
+      let changed = false;
+      if (this.previousAgentIds.size !== currentAgentIds.size) {
+        changed = true;
+      } else {
+        for (const id of currentAgentIds) {
+          if (!this.previousAgentIds.has(id)) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (changed) {
+        this.dismissed = false;
+      }
+    }
+    this.previousAgentIds = currentAgentIds;
+
     // A run with no agents of its own left in the list is still worth a row —
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
@@ -344,23 +375,69 @@ export class FleetList {
   // ---- Roster ----
 
   /**
-   * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session), so Enter
-   * never dead-ends. Included: running/queued, plus the agent currently being
-   * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Pending agents with no session yet are hidden until they start.
-   * (`listAgents()` is newest-first, so we re-sort.)
+   * Builds a Claude Code-style hierarchical roster of subagents.
+   * Top-level agents appear at depth 0. Nested subagents (child agents spawned by a parent)
+   * appear indented under their parent with tree branches (`├─ ` / `└─ `).
    */
-  private agentRecords(): AgentRecord[] {
+  private agentRosterEntries(): AgentEntry[] {
     const now = Date.now();
-    return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && a.session && (
+    const eligible = this.manager.listAgents().filter(a =>
+      !a.workflowId && a.session && (
         a.status === "running" || a.status === "queued" || a.status === "paused"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
-      ))
-      .sort((a, b) => a.startedAt - b.startedAt);
+      )
+    );
+
+    const eligibleMap = new Map<string, AgentRecord>(eligible.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, AgentRecord[]>();
+
+    for (const a of eligible) {
+      if (a.parentAgentId && eligibleMap.has(a.parentAgentId)) {
+        let list = childrenByParent.get(a.parentAgentId);
+        if (!list) {
+          list = [];
+          childrenByParent.set(a.parentAgentId, list);
+        }
+        list.push(a);
+      }
+    }
+
+    for (const list of childrenByParent.values()) {
+      list.sort((a, b) => a.startedAt - b.startedAt);
+    }
+
+    const roots = eligible.filter(a => !a.parentAgentId || !eligibleMap.has(a.parentAgentId));
+    roots.sort((a, b) => a.startedAt - b.startedAt);
+
+    const result: AgentEntry[] = [];
+    const visited = new Set<string>();
+
+    const appendWithChildren = (rec: AgentRecord, depth: number, isLastChild?: boolean) => {
+      if (visited.has(rec.id)) return;
+      visited.add(rec.id);
+
+      result.push({
+        kind: "agent",
+        record: rec,
+        depth,
+        isLastChild,
+      });
+
+      const children = childrenByParent.get(rec.id) ?? [];
+      for (let i = 0; i < children.length; i++) {
+        const isLast = i === children.length - 1;
+        appendWithChildren(children[i], depth + 1, isLast);
+      }
+    };
+
+    for (const root of roots) {
+      appendWithChildren(root, 0);
+    }
+
+    return result;
   }
+
 
   /**
    * Wire workflow runs into the list.
@@ -430,20 +507,23 @@ export class FleetList {
     return [
       { kind: "main" },
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
-      ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
+      ...this.agentRosterEntries(),
     ];
   }
 
   /**
    * `p`: pause the selected agent if active, resume it if paused — the same
    * one-lifecycle toggle the hub's roster uses. Settled agents stay put.
-   * The row re-renders from the record, so the glyph flip is the feedback;
-   * there is no toast surface down here.
+   * Nested child subagents cannot be paused directly (managed by parent).
    */
   private pauseResumeSelected(): void {
     const entry = this.roster()[this.selectedIndex];
     if (entry?.kind !== "agent" || !this.lifecycleActions) return;
-    const { status, id } = entry.record;
+    const { status, id, parentAgentId } = entry.record;
+    if (parentAgentId) {
+      this.ui?.notify("Nested subagents are managed by their parent agent and cannot be paused directly", "warning");
+      return;
+    }
     if (status === "running" || status === "queued") this.lifecycleActions.pause(id);
     else if (status === "paused") this.lifecycleActions.resume(id);
     this.update();
@@ -658,8 +738,10 @@ export class FleetList {
         // invisible navigation instead of the recall branch. Hand-rolled
         // rather than deactivate() so the viewed-agent cursor survives.
         this.active = false;
+        this.previousAgentIds = new Set(this.agentRosterEntries().map(e => e.record.id));
         this.clearViewer();
         this.dismissed = true;
+        this.update();
       }, 0);
     });
   }
@@ -754,7 +836,7 @@ export class FleetList {
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme, hasBgTasks)
-        : this.renderAgentRow(a + 1, sel, row.record, width, theme, hasBgTasks),
+        : this.renderAgentRow(a + 1, sel, row, width, theme, hasBgTasks),
       );
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
@@ -798,11 +880,12 @@ export class FleetList {
   private renderAgentRow(
     rosterIndex: number,
     sel: number,
-    record: AgentRecord,
+    entry: AgentEntry,
     width: number,
     theme: Theme,
     hasBgTasks = false,
   ): string {
+    const { record, depth = 0, isLastChild } = entry;
     // The selected row renders in the theme's primary text color so it reads as
     // one selection (#230). A configured badge survives — Claude Code's FleetView
     // keeps the agent color on the selected row too and only bolds it — which also
@@ -812,7 +895,15 @@ export class FleetList {
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${name}  ${description}`;
+
+    let left: string;
+    if (depth > 0) {
+      const indent = "  ".repeat(depth);
+      const branch = isLastChild ? "└─ " : "├─ ";
+      left = `  ${indent}${theme.fg("dim", branch)}${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${name}  ${description}`;
+    } else {
+      left = `  ${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${name}  ${description}`;
+    }
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.

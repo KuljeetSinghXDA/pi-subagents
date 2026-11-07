@@ -54,7 +54,6 @@ import type {
   JoinMode,
   UIStyle,
   ViewerStyle,
-  WidgetMode,
 } from "../types.js";
 import type { AgentWidget } from "../ui/agent-widget.js";
 import type { FleetList } from "../ui/fleet-list.js";
@@ -98,8 +97,6 @@ export interface SettingsMenuDeps {
   setDisableDefaultAgents: (b: boolean) => void;
   getToolDescriptionMode: () => ToolDescriptionMode;
   setToolDescriptionMode: (m: ToolDescriptionMode) => void;
-  getWidgetMode: () => WidgetMode;
-  setWidgetMode: (m: WidgetMode) => void;
 }
 
 function snapshotSettings(deps: SettingsMenuDeps) {
@@ -118,7 +115,6 @@ function snapshotSettings(deps: SettingsMenuDeps) {
     fleetView: deps.isFleetViewEnabled(),
     agentMentions: deps.getAgentMentionMode(),
     rememberAgents: getRememberAgents(),
-    widgetMode: deps.getWidgetMode(),
     outputTranscript: getOutputTranscriptDefault(),
     worktreeIsolation: isWorktreeIsolationEnabled(),
     workflowsEnabled: deps.isWorkflowsPinned() ? deps.isWorkflowsEnabled() : undefined,
@@ -203,8 +199,6 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
     setDisableDefaultAgents,
     getToolDescriptionMode,
     setToolDescriptionMode,
-    getWidgetMode,
-    setWidgetMode,
   } = deps;
 
   function buildItems(): SettingItem[] {
@@ -408,13 +402,6 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         values: ["on", "off"],
       },
       {
-        id: "widgetMode",
-        label: "Widget",
-        description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
-        currentValue: getWidgetMode(),
-        values: ["all", "background", "off"],
-      },
-      {
         id: "toolDescriptionMode",
         label: "Tool description",
         description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
@@ -596,9 +583,6 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
       const enabled = value === "on";
       setRememberAgents(enabled);
       notifyApplied(ctx, `Remember agents ${enabled ? "enabled" : "disabled"}`, deps);
-    } else if (id === "widgetMode") {
-      setWidgetMode(value as WidgetMode);
-      notifyApplied(ctx, `Widget set to ${value}`, deps);
     }
   }
 

@@ -9,7 +9,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { AgentInvocation, SubagentType, UIStyle, WidgetMode } from "../types.js";
+import type { AgentInvocation, SubagentType, UIStyle } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -354,67 +354,21 @@ export class AgentWidget {
   /** How many extra turns errors/aborted agents linger (completed agents clear after 1 turn). */
   private static readonly ERROR_LINGER_TURNS = 2;
 
-  /** Whether the widget callback is currently registered with the TUI. */
-  private widgetRegistered = false;
-  /** Cached TUI reference from widget factory callback, used for requestRender(). */
-  private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
 
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
-    /**
-     * Read live at render time. Selects which agents the widget shows — see
-     * `WidgetMode`. Defaults to `"all"` when a caller supplies no policy; the
-     * extension supplies one defaulting to `"background"`.
-     */
-    private mode: () => WidgetMode = () => "all",
-    /**
-     * Read live at render time, like `mode`. Whether running agents show an
-     * estimated cost beside their token count. Defaults to off — the extension
-     * supplies the user's `showCost` setting.
-     */
     private showCost: () => boolean = () => false,
-    /**
-     * Read live at render time, like `mode`. Whether running agents name the
-     * model driving them and the thinking level it is running at. Defaults to
-     * off — the extension supplies the user's `showModel` setting — because the
-     * row is already dense and the same pair is on the tool result and in the
-     * conversation viewer unconditionally.
-     */
     private showModel: () => boolean = () => false,
     private uiStyle: () => UIStyle = () => "pi",
   ) {}
 
-  /**
-   * Agents eligible for the widget, per the current `WidgetMode`:
-   *   - `off`: none (the widget's existing empty-state path hides it entirely).
-   *   - `background`: drop only agents *known* to be foreground
-   *     (`isBackground === false`); keep everything else — background, queued,
-   *     scheduled, or RPC-spawned (`undefined`). Keying off the `isBackground`
-   *     record flag rather than the UI-only `invocation` snapshot (which only the
-   *     Agent-tool path sets), and excluding rather than allow-listing, means
-   *     only proven-foreground runs drop out — nothing else silently vanishes.
-   *   - `all`: every agent.
-   */
-  private widgetAgents() {
-    const all = this.manager.listAgents().filter(isTopLevelAgent);
-    switch (this.mode()) {
-      case "off": return [];
-      case "background": return all.filter(a => a.isBackground !== false);
-      default: return all;
-    }
-  }
-
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
     if (ctx !== this.uiCtx) {
-      // UICtx changed — the widget registered on the old context is gone.
-      // Force re-registration on next update().
       this.uiCtx = ctx;
-      this.widgetRegistered = false;
-      this.tui = undefined;
       this.lastStatusText = undefined;
     }
   }
@@ -516,8 +470,8 @@ export class AgentWidget {
    * Render the widget content. Called from the registered widget's render() callback,
    * reading live state each time instead of capturing it in a closure.
    */
-  private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.widgetAgents();
+  renderWidget(tui: any, theme: Theme): string[] {
+    const allAgents = this.manager.listAgents().filter(isTopLevelAgent);
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
@@ -675,38 +629,26 @@ export class AgentWidget {
     return lines;
   }
 
-  /** Force an immediate widget update. */
+  /** Force an immediate status update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.widgetAgents();
+    const allAgents = this.manager.listAgents().filter(isTopLevelAgent);
 
-    // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
     let queuedCount = 0;
-    let hasFinished = false;
     for (const a of allAgents) {
       if (a.status === "running") { runningCount++; }
       else if (a.status === "queued") { queuedCount++; }
-      else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
 
-    // Nothing to show — clear widget
-    if (!hasActive && !hasFinished) {
-      if (this.widgetRegistered) {
-        this.uiCtx.setWidget("agents", undefined);
-        this.widgetRegistered = false;
-        this.tui = undefined;
-      }
+    // Nothing active — clear status
+    if (!hasActive) {
       if (this.lastStatusText !== undefined) {
         this.uiCtx.setStatus("subagents", undefined);
         this.lastStatusText = undefined;
       }
       if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
-      // Clean up stale entries
-      for (const [id] of this.finishedTurnAge) {
-        if (!allAgents.some(a => a.id === id)) this.finishedTurnAge.delete(id);
-      }
       return;
     }
 
@@ -739,26 +681,6 @@ export class AgentWidget {
     }
 
     this.widgetFrame++;
-
-    // Register widget callback once; subsequent updates use requestRender()
-    // which re-invokes render() without replacing the component (avoids layout thrashing).
-    if (!this.widgetRegistered) {
-      this.uiCtx.setWidget("agents", (tui, theme) => {
-        this.tui = tui;
-        return {
-          render: () => this.renderWidget(tui, theme),
-          invalidate: () => {
-            // Theme changed — force re-registration so factory captures fresh theme.
-            this.widgetRegistered = false;
-            this.tui = undefined;
-          },
-        };
-      }, { placement: "aboveEditor" });
-      this.widgetRegistered = true;
-    } else {
-      // Widget already registered — just request a re-render of existing components.
-      this.tui?.requestRender();
-    }
   }
 
   dispose() {
@@ -767,11 +689,8 @@ export class AgentWidget {
       this.widgetInterval = undefined;
     }
     if (this.uiCtx) {
-      this.uiCtx.setWidget("agents", undefined);
       this.uiCtx.setStatus("subagents", undefined);
     }
-    this.widgetRegistered = false;
-    this.tui = undefined;
     this.lastStatusText = undefined;
   }
 }
