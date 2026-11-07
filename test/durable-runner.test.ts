@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
@@ -6,7 +10,7 @@ import { runDurableAgent } from "../src/runner/durable-runner.js";
 
 function createMockCtx(): ExtensionContext {
   return {
-    cwd: "/mock/project",
+    cwd: process.cwd(),
     getSystemPrompt: () => "You are a test assistant.",
     model: { provider: "mock-provider", id: "mock-model" },
     modelRegistry: {
@@ -71,15 +75,23 @@ describe("runDurableAgent", () => {
     const ctx = createMockCtx();
     const pi = createMockPi();
 
-    // Bare continuation via runAgent
-    const result = await runAgent(ctx, "Explore", undefined, {
-      pi,
-      resumeSessionFile: "/mock/session.jsonl", // bypass required prompt check
-    });
+    const tempDir = mkdtempSync(join(tmpdir(), "pi-durable-test-"));
+    const sm = SessionManager.create(tempDir, tempDir);
+    const sessionFile = sm.getSessionFile()!;
 
-    expect(result).toBeDefined();
-    expect(result.aborted).toBe(false);
-    expect(result.session).toBeDefined();
+    try {
+      // Bare continuation via runAgent with a valid temporary session file
+      const result = await runAgent(ctx, "Explore", undefined, {
+        pi,
+        resumeSessionFile: sessionFile,
+      });
+
+      expect(result).toBeDefined();
+      expect(result.aborted).toBe(false);
+      expect(result.session).toBeDefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("suspends on beforeToolCall when paused and resumes when released", async () => {
