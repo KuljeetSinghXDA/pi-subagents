@@ -3,6 +3,10 @@
  */
 
 import { resolve } from "node:path";
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { type Model } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   type AgentSession,
   createAgentSession,
@@ -13,6 +17,17 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import {
+  type Conversation,
+  createRegistry,
+  defineExtension,
+  Harness,
+  MemoryStorage,
+  type Registry,
+  type ToolRegistration,
+} from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
 import {
   BUILTIN_TOOL_NAMES,
   getAgentConfig,
@@ -40,7 +55,7 @@ import {
   structuredRetryPrompt,
 } from "../structured-output.js";
 import type { AgentConfig, SubagentType } from "../types.js";
-import { runDurableAgent } from "./durable-runner.js";
+import { bridgePiToolToDurableTool } from "./durable-tool-bridge.js";
 import {
   extensionCanonicalNames,
   installExtensionToolScope,
@@ -53,7 +68,6 @@ import {
 import {
   collectResponseText,
   finalTurnError,
-  forwardAbortSignal,
   getLastAssistantText,
   observeRun,
   resolveConfiguredSessionDir,
@@ -69,17 +83,6 @@ import {
   type RunOptions,
   type RunResult,
 } from "./runner-types.js";
-
-/**
- * Open an agent's saved session to continue it — or a copy of it, when the
- * session belongs to another parent.
- */
-function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
-  const opened = SessionManager.open(file, sessionDir);
-  const owner = opened.getHeader()?.parentSession;
-  if (owner === undefined || owner === parentSessionFile) return opened;
-  return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
-}
 
 interface PreparedSystemPrompt {
   systemPrompt: string;
@@ -103,7 +106,9 @@ async function prepareAgentSystemPrompt(
 
   // Get parent system prompt for append-mode agents, without the sections the
   // child session renders itself (skills, cwd, extension sections).
-  const parentSystemPrompt = inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd);
+  const parentSystemPrompt = typeof ctx.getSystemPrompt === "function"
+    ? inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd)
+    : "";
 
   const extras: PromptExtras = {};
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
@@ -212,7 +217,7 @@ async function createRunnerResourceLoader(
           };
         };
 
-  const projectTrusted = ctx.isProjectTrusted();
+  const projectTrusted = typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
   const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
   const sessionSettingsManager =
     resolve(effectiveCwd) === resolve(configCwd)
@@ -510,9 +515,24 @@ interface CreateSessionParams {
 }
 
 /**
- * SRP Phase 4: Session creation, naming, extension binding, and scope installation.
+ * Open an agent's saved session to continue it — or a copy of it, when the
+ * session belongs to another parent.
  */
-async function createAndBindSession(params: CreateSessionParams): Promise<AgentSession> {
+function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
+  const opened = SessionManager.open(file, sessionDir);
+  const header = opened.getHeader();
+  if (!header?.parentSession || header.parentSession === parentSessionFile) return opened;
+  return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
+}
+
+/**
+ * SRP Phase 4: Session creation, extension binding, scope installation, and durable registry setup.
+ */
+async function createDurableRegistryAndSession(params: CreateSessionParams): Promise<{
+  session: AgentSession;
+  registry: Registry;
+  toolsFilter?: { remove: readonly ToolRegistration[] };
+}> {
   const {
     ctx, type, agentConfig, effectiveCwd, agentDir, loader, sessionSettingsManager,
     model, thinkingLevel, sessionTools, sessionExcludeTools, customTools,
@@ -532,7 +552,7 @@ async function createAndBindSession(params: CreateSessionParams): Promise<AgentS
         })
       : SessionManager.inMemory(effectiveCwd);
 
-  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown } | undefined)?.runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: any;
     modelRuntime?: unknown;
@@ -571,6 +591,13 @@ async function createAndBindSession(params: CreateSessionParams): Promise<AgentS
     },
   });
 
+  if ((session as any)._extensionRunner?.emitBeforeAgentStart) {
+    await (session as any)._extensionRunner.emitBeforeAgentStart(
+      { prompt: "", messageType: "user" },
+      { cwd: effectiveCwd },
+    );
+  }
+
   if (!noExtensions) {
     const isolated = agentConfig?.isolated ?? options.isolated;
     installExtensionToolScope(session, {
@@ -585,35 +612,229 @@ async function createAndBindSession(params: CreateSessionParams): Promise<AgentS
     });
   }
 
+  // Durable Registry setup
+  const registry = createRegistry();
+  // Option B: Install CodingTools from @earendil-works/pi-durable/tools
+  registry.install(CodingTools);
+
+  // Extract all active session tools (MCP tools, extension tools, custom tools, nested subagent tools)
+  const activeToolNames = session.getActiveToolNames();
+  const durableBridgedTools: ToolRegistration[] = [];
+  const builtInCodingNames = new Set(["read", "write", "edit", "bash"]);
+
+  for (const name of activeToolNames) {
+    if (builtInCodingNames.has(name)) continue;
+    const toolDef = session.getToolDefinition(name);
+    if (toolDef) {
+      const toolToBridge = {
+        name: (toolDef as any).name ?? name,
+        description: (toolDef as any).description ?? "",
+        parameters: (toolDef as any).parameters ?? { type: "object", properties: {} },
+        execute: (toolDef as any).execute ?? (async () => ({ content: [] })),
+        prepareArguments: (toolDef as any).prepareArguments,
+      };
+      durableBridgedTools.push(
+        bridgePiToolToDurableTool(toolToBridge as any, {
+          onActivity: options.onToolActivity,
+          signal: options.signal,
+          toolContext: (callId: string) =>
+            (session as any)._extensionRunner?.createToolContext(callId, options.signal) ?? ctx,
+        }),
+      );
+    }
+  }
+
+  if (durableBridgedTools.length > 0) {
+    registry.install(
+      defineExtension({
+        name: `pi-bridged-tools-${type}`,
+        tools: durableBridgedTools,
+      }),
+    );
+  }
+
+  let toolsFilter: { remove: readonly ToolRegistration[] } | undefined;
+  if (disallowedSet && disallowedSet.size > 0) {
+    toolsFilter = {
+      remove: [...disallowedSet].map((name) => ({ name } as unknown as ToolRegistration)),
+    };
+  }
+
   options.onSessionCreated?.(session);
-  return session;
+  return { session, registry, toolsFilter };
 }
 
 /**
- * SRP Phase 5: Execute prompt, handle observers, signal forwarding, structured output retries, and result assembly.
+ * SRP Phase 5: Execute prompt using @earendil-works/pi-durable Harness with NodeExecutionEnv.
  */
-async function executeAgentPrompt(
+async function executeDurableAgentPrompt(
   ctx: ExtensionContext,
   session: AgentSession,
+  registry: Registry,
   prompt: string | undefined,
   type: SubagentType,
+  effectiveCwd: string,
+  systemPrompt: string,
+  toolLoadout: SessionToolLoadout,
+  toolsFilter: { remove: readonly ToolRegistration[] } | undefined,
   options: RunOptions,
-  structuredCapture: ReturnType<typeof createStructuredCapture> | undefined,
 ): Promise<RunResult> {
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+  if (options.signal?.aborted) {
+    return {
+      responseText: "",
+      session,
+      aborted: true,
+      steered: false,
+    };
+  }
 
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
+  const models = builtinModels();
+  const allModels: Model<any>[] = [
+    ...(toolLoadout.model ? [toolLoadout.model] : []),
+    ...(ctx.model ? [ctx.model] : []),
+    ...(ctx.modelRegistry?.getAll ? ctx.modelRegistry.getAll() : []),
+  ];
+  const byProvider = new Map<string, Model<any>[]>();
+  let lastStreamError: string | undefined;
+  let lastStreamErrorMessage: any | undefined;
 
-  const startLen = session.messages.length;
+  for (const m of allModels) {
+    if (!m?.provider) continue;
+    const list = byProvider.get(m.provider) ?? [];
+    if (!list.some((existing) => existing.id === m.id)) {
+      list.push(m);
+    }
+    byProvider.set(m.provider, list);
+  }
+  for (const [providerId, providerModels] of byProvider) {
+    models.setProvider({
+      id: providerId,
+      name: providerId,
+      auth: {
+        apiKey: {
+          name: providerId,
+          resolve: async () => {
+            const target = providerModels[0];
+            if (ctx.modelRegistry?.getApiKeyAndHeaders && target) {
+              try {
+                const res = await ctx.modelRegistry.getApiKeyAndHeaders(target);
+                if (res?.ok) {
+                  return {
+                    auth: {
+                      apiKey: res.apiKey ?? "configured",
+                      headers: res.headers,
+                      baseUrl: res.baseUrl,
+                    },
+                    source: "registry",
+                  };
+                }
+              } catch {
+                // best effort
+              }
+            }
+            return { auth: { apiKey: "configured" }, source: "configured" };
+          },
+        },
+      },
+      getModels: () => providerModels,
+      streamSimple: (m, context, opts) => {
+        const streamFn = ctx.modelRegistry?.streamSimple
+          ? (model: any, c: any, o: any) => ctx.modelRegistry.streamSimple(model, c, o)
+          : (session as any)?._modelRuntime?.streamSimple
+            ? (model: any, c: any, o: any) => (session as any)._modelRuntime.streamSimple(model, c, o)
+            : streamSimple;
+        try {
+          const res = streamFn(m, context, opts as any);
+          res.result?.().then((msg: any) => {
+            if (msg?.stopReason === "error") {
+              lastStreamError = msg.errorMessage ?? "provider error with no output";
+              lastStreamErrorMessage = msg;
+            }
+          }).catch((err: any) => {
+            lastStreamError = err instanceof Error ? err.message : String(err);
+          });
+          return res;
+        } catch (err: any) {
+          lastStreamError = err instanceof Error ? err.message : String(err);
+          throw err;
+        }
+      },
+      stream: (m, context, opts) => {
+        const streamFn = ctx.modelRegistry?.stream
+          ? (model: any, c: any, o: any) => ctx.modelRegistry.stream(model, c, o)
+          : (session as any)?._modelRuntime?.stream
+            ? (model: any, c: any, o: any) => (session as any)._modelRuntime.stream(model, c, o)
+            : streamSimple;
+        try {
+          const res = streamFn(m, context, opts as any);
+          res.result?.().then((msg: any) => {
+            if (msg?.stopReason === "error") {
+              lastStreamError = msg.errorMessage ?? "provider error with no output";
+              lastStreamErrorMessage = msg;
+            }
+          }).catch((err: any) => {
+            lastStreamError = err instanceof Error ? err.message : String(err);
+          });
+          return res;
+        } catch (err: any) {
+          lastStreamError = err instanceof Error ? err.message : String(err);
+          throw err;
+        }
+      },
+    });
+  }
+
+  const storage = options.storage ?? new MemoryStorage();
+  const baseContext = options.signal ? withAbortSignal(options.signal, BACKGROUND_CONTEXT) : BACKGROUND_CONTEXT;
+
+  const harness = await Harness.open(
+    storage,
+    {
+      models,
+      registry,
+      env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? effectiveCwd }),
+    },
+    baseContext,
+  );
+
+  const modelRef = toolLoadout.model
+    ? { provider: toolLoadout.model.provider, modelId: toolLoadout.model.id }
+    : ctx.model
+      ? { provider: ctx.model.provider, modelId: ctx.model.id }
+      : undefined;
+
+  let conversation: Conversation;
   let structuredRetried = false;
+
+  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+  const collector = collectResponseText(session);
+  const startIndex = session.messages.length;
+
+  const abortListener = () => {
+    session.abort?.();
+    conversation?.abort(baseContext).catch(() => {});
+  };
+  options.signal?.addEventListener("abort", abortListener, { once: true });
+
   try {
+    conversation = await harness.root(baseContext, {
+      agent: {
+        model: modelRef,
+        thinkingLevel: (toolLoadout.thinkingLevel as any) ?? undefined,
+        instructions: systemPrompt,
+        maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns),
+        cwd: effectiveCwd,
+        ...(toolsFilter ? { tools: toolsFilter } : {}),
+      },
+    });
+
+
+
+    let trimmed = "";
     if (prompt === undefined) {
       await continueSessionBare(session, { signal: options.signal });
     } else {
       let effectivePrompt = prompt;
-      // Parent context only for a fresh conversation — a reopened one already
-      // holds its history, and a live resume never re-sends the parent's either.
       if (options.inheritContext && !options.resumeSessionFile) {
         const parentContext = buildParentContext(ctx);
         if (parentContext) {
@@ -621,40 +842,134 @@ async function executeAgentPrompt(
         }
       }
 
-      if (options.signal?.aborted !== true) await session.prompt(effectivePrompt);
+      const userMessage = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: effectivePrompt }],
+        timestamp: Date.now(),
+      };
+      session.messages.push(userMessage as any);
+      session.sessionManager?.appendMessage?.(userMessage as any);
 
-      if (structuredCapture !== undefined && structuredCapture.json === undefined
-        && !run.aborted && options.signal?.aborted !== true) {
+      const submission = await conversation.submit({ type: "input", content: effectivePrompt }, baseContext);
+      const settled = await submission.wait(baseContext);
+
+      if (
+        toolLoadout.structuredCapture !== undefined &&
+        toolLoadout.structuredCapture.json === undefined &&
+        options.signal?.aborted !== true
+      ) {
         structuredRetried = true;
-        await session.prompt(structuredRetryPrompt(structuredCapture));
+        const retrySubmission = await conversation.submit(
+          { type: "input", content: structuredRetryPrompt(toolLoadout.structuredCapture) },
+          baseContext,
+        );
+        await retrySubmission.wait(baseContext);
+      }
+
+      const contextView = await conversation.context(baseContext);
+      const messages = contextView.messages;
+
+      let responseText = "";
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg && msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part && typeof part === "object" && (part as any).type === "text") {
+              responseText = (part as any).text;
+              break;
+            }
+          }
+          if (responseText) break;
+        }
+      }
+
+      trimmed = responseText.trim();
+      if (trimmed && options.onTextDelta) {
+        options.onTextDelta(trimmed, trimmed);
+      }
+
+      // Check if pause gate was installed (e.g. agent paused mid-run)
+      const newMessages = messages[0]?.role === "user" ? messages.slice(1) : messages;
+      if ((session as any).agent?.finishTurn) {
+        await (session as any).agent.finishTurn(
+          { message: newMessages[0] ?? { role: "assistant", content: [] }, toolResults: [] },
+          options.signal,
+        );
+      }
+
+      // Append newly produced messages to session and sessionManager for persistence
+      for (const msg of newMessages) {
+        session.messages.push(msg as any);
+        session.sessionManager?.appendMessage?.(msg as any);
+        if (options.onAssistantUsage && (msg as any).usage) {
+          const u = (msg as any).usage;
+          options.onAssistantUsage({
+            input: u.input ?? 0,
+            output: u.output ?? 0,
+            cacheRead: u.cacheRead ?? 0,
+            cacheWrite: u.cacheWrite ?? 0,
+            cost: u.cost?.total ?? (typeof u.cost === "number" ? u.cost : 0),
+          });
+        }
+      }
+
+      if (settled.status === "unanswered") {
+        if (lastStreamErrorMessage) {
+          session.messages.push(lastStreamErrorMessage);
+          session.sessionManager?.appendMessage?.(lastStreamErrorMessage);
+        } else {
+          const errText =
+            lastStreamError ?? (settled as any).detail ?? (settled as any).reason ?? "provider error with no output";
+          const failureMessage = {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "" }],
+            stopReason: "error" as const,
+            errorMessage: errText,
+            timestamp: Date.now(),
+          };
+          session.messages.push(failureMessage as any);
+          session.sessionManager?.appendMessage?.(failureMessage as any);
+        }
       }
     }
+
+    const streamText = collector.getText().trim();
+    const fallbackText = getLastAssistantText(session, startIndex);
+    const resolvedResponseText = streamText || fallbackText || trimmed;
+
+    const structuredFailure =
+      toolLoadout.structuredCapture !== undefined && toolLoadout.structuredCapture.json === undefined
+        ? toolLoadout.structuredCapture.lastError !== undefined
+          ? `The agent's StructuredOutput call did not match the required schema: ${toolLoadout.structuredCapture.lastError}`
+          : "The agent did not report its answer through StructuredOutput."
+        : undefined;
+
+    const finalError = finalTurnError(session, startIndex);
+    const failure = finalError ?? structuredFailure;
+
+    return {
+      responseText: resolvedResponseText,
+      session,
+      aborted: options.signal?.aborted === true || run.aborted,
+      steered: run.steered,
+      failure,
+      ...(toolLoadout.structuredCapture?.json !== undefined ? { structuredJson: toolLoadout.structuredCapture.json } : {}),
+      ...(structuredRetried ? { structuredRetried } : {}),
+    };
   } finally {
     run.unsubscribe();
     collector.unsubscribe();
-    cleanupAbort();
+    options.signal?.removeEventListener("abort", abortListener);
+    try {
+      await harness.close(baseContext);
+    } catch {
+      // best-effort cleanup
+    }
   }
-
-  const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
-  const structuredFailure = structuredCapture !== undefined && structuredCapture.json === undefined
-    ? structuredCapture.lastError !== undefined
-      ? `The agent's StructuredOutput call did not match the required schema: ${structuredCapture.lastError}`
-      : "The agent did not report its answer through StructuredOutput."
-    : undefined;
-  return {
-    responseText,
-    session,
-    aborted: run.aborted,
-    steered: run.steered,
-    failure: finalTurnError(session, startLen) ?? structuredFailure,
-    ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
-    ...(structuredRetried ? { structuredRetried } : {}),
-  };
 }
 
 /**
- * Execute a subagent with full lifecycle orchestration.
- * Opts into @earendil-works/pi-durable if options.durable or agentConfig.durable is set.
+ * Execute a subagent with full lifecycle orchestration via @earendil-works/pi-durable.
  */
 export async function runAgent(
   ctx: ExtensionContext,
@@ -662,16 +977,7 @@ export async function runAgent(
   prompt: string | undefined,
   options: RunOptions,
 ): Promise<RunResult> {
-  if (prompt === undefined && options.resumeSessionFile === undefined) {
-    throw new Error("runAgent requires a prompt unless resumeSessionFile is set");
-  }
-
   const agentConfig = getAgentConfig(type);
-
-  if (options.durable ?? agentConfig?.durable) {
-    return runDurableAgent(ctx, type, prompt, options);
-  }
-
   const effectiveCwd = options.cwd ?? ctx.cwd;
   const configCwd = options.configCwd ?? effectiveCwd;
   const config = getConfig(type);
@@ -693,8 +999,8 @@ export async function runAgent(
     configCwd, options,
   );
 
-  // 4. Instantiate session, name, bind extensions, and apply security gates
-  const session = await createAndBindSession({
+  // 4. Instantiate session, bind extensions (including MCP), and build durable registry
+  const { session, registry, toolsFilter } = await createDurableRegistryAndSession({
     ctx,
     type,
     agentConfig,
@@ -718,8 +1024,8 @@ export async function runAgent(
     options,
   });
 
-  // 5. Execute agent loop and return observed results
-  return executeAgentPrompt(
-    ctx, session, prompt, type, options, toolLoadout.structuredCapture,
+  // 5. Execute agent loop durably with NodeExecutionEnv and return observed results
+  return executeDurableAgentPrompt(
+    ctx, session, registry, prompt, type, effectiveCwd, systemPrompt, toolLoadout, toolsFilter, options,
   );
 }

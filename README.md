@@ -14,7 +14,7 @@ A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-
 
 ### Functional additions
 - **Global `/pause` and `/continue` that survive quitting pi** — `/pause` parks the main agent's turn at its next boundary (before a pending tool call or the next model request — nothing in flight is killed), every active top-level agent, and active workflow runs, writing one row per agent and workflow run to a per-session manifest at `<cwd>/.pi/subagent-pauses/<sessionId>.json` — its session file when it has one, otherwise a respawn recipe (the original prompt plus the invocation the record held), or the workflow script and journal path — so the session can be exited right after; `/continue` — which never sends a prompt — reopens the gates and resumes paused runs in this session, or — after the session is loaded again — continues the parked main turn (pending tool calls execute first), revives session-backed agents from their persisted session files, re-runs session-less ones from scratch, and relaunches workflow runs from their journal replay with handles and aliases reclaimed. Loading a session with parked work hints `N subagents paused here` and/or `N workflow runs paused here — /continue to resume`. Upstream has no pause, resume, or revive at all — the whole family, and everything that crosses a process boundary, is fork-only.
-- **Transactional, crash-resilient subagent runs via `@earendil-works/pi-durable`** — Subagents can opt into durable execution by setting `durable: true` in agent frontmatter or invocation options. Powered by `pi-durable`'s `Harness` engine over memory or transactional storage, it provides native task ownership, execution scheduling, and state persistence without requiring ad-hoc transcript healing or shadow session files.
+- **Universal durable execution engine via `@earendil-works/pi-durable`** — Subagents run exclusively on `pi-durable`'s `Harness` engine with native task scheduling, transactional state management, and crash resilience. Built-in coding tools (`read`, `write`, `edit`, `bash`) are powered by `@earendil-works/pi-durable/tools`, while workspace extensions, MCP servers, and nested orchestration tools (`Agent`, `get_subagent_result`, `steer_subagent`, `ask_parent`) are bridged into durable tool registrations.
 
 ### Visual support for nested agents
 - **Nested subagent hierarchy in Agent Hub** — Child subagents spawned by custom agents via `allowed_subagents` are fully visible and manageable in the hub roster (upstream filtered them out):
@@ -1127,7 +1127,12 @@ src/
   agent-color.ts      # Claude Code/Agency Agents name color parsing and badge rendering
 
   # Execution
-  agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
+  agent-runner.ts     # Re-exports runAgent/runDurableAgent from runner/
+  runner/
+    runner-session.ts # Universal durable execution pipeline with @earendil-works/pi-durable Harness
+    durable-tool-bridge.ts # Adapts Pi extension tools, MCP servers, and nested tools to durable ToolRegistration
+    durable-runner.ts # Durable runner interface and type exports
+    runner-types.ts   # Session runner options, state, and dependency interfaces
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   nested-tools.ts     # Delegation tools handed to subagents (nested spawn/collect/steer)
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session

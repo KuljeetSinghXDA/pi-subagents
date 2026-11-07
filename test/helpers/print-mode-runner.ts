@@ -242,7 +242,11 @@ export function routeBySession(routes: {
 /** Normalize any FauxReply into a faux AssistantMessage (tool calls ⇒ stopReason "toolUse"). */
 function toAssistantMessage(reply: FauxReply): AssistantMessage {
   if (reply && typeof reply === "object" && "role" in reply) {
-    return reply as AssistantMessage;
+    const msg = reply as AssistantMessage;
+    if (msg.stopReason === "stop" && Array.isArray(msg.content) && msg.content.some((b) => (b as { type?: string }).type === "toolCall")) {
+      return { ...msg, stopReason: "toolUse" };
+    }
+    return msg;
   }
   const content: FauxContentBlock[] =
     typeof reply === "string" ? [fauxText(reply)] : Array.isArray(reply) ? reply : [reply];

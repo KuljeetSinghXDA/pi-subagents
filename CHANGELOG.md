@@ -9,6 +9,11 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+> **⚠️ Breaking: Universal durable subagent execution engine**
+
+### Changed
+- **BREAKING: All subagent runs execute universally through `@earendil-works/pi-durable`'s `Harness`**. Removed the opt-in `durable?: boolean` flag from `AgentConfig` and `RunOptions`. Built-in coding tools (`read`, `write`, `edit`, `bash`) are provided by `@earendil-works/pi-durable/tools`, while workspace extensions, MCP servers, and nested delegation tools (`Agent`, `get_subagent_result`, `steer_subagent`, `ask_parent`) are bridged into durable tool registrations. Legacy non-durable runner execution pathways have been retired.
+
 ## [2026.11.061] - 2026-11-06
 
 ### Added

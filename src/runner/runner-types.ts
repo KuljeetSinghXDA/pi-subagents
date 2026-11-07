@@ -11,6 +11,7 @@ import {
   type ExtensionAPI,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
+import type { Storage } from "@earendil-works/pi-durable";
 import type { NestedAgentManager } from "../nested-tools.js";
 import type { SubagentType, ThinkingLevel } from "../types.js";
 import type { LifetimeUsage } from "../usage.js";
@@ -79,8 +80,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. */
   isolated?: boolean;
-  /** Execute through @earendil-works/pi-durable engine with transactional storage. */
-  durable?: boolean;
+  /** Storage backend for @earendil-works/pi-durable harness (defaults to MemoryStorage). */
+  storage?: Storage;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /**

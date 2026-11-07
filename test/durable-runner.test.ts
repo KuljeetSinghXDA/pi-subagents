@@ -56,23 +56,22 @@ describe("runDurableAgent", () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(
-      runDurableAgent(ctx, "Explore", undefined, {
-        pi,
-        storage,
-        signal: controller.signal,
-      }),
-    ).rejects.toThrow();
+    const result = await runDurableAgent(ctx, "Explore", undefined, {
+      pi,
+      storage,
+      signal: controller.signal,
+    });
+
+    expect(result.aborted).toBe(true);
   });
 
-  it("routes through runAgent when options.durable is true", async () => {
+  it("routes universally through runAgent with durable execution", async () => {
     const ctx = createMockCtx();
     const pi = createMockPi();
 
-    // Bare continuation via runAgent with durable: true
+    // Bare continuation via runAgent
     const result = await runAgent(ctx, "Explore", undefined, {
       pi,
-      durable: true,
       resumeSessionFile: "/mock/session.jsonl", // bypass required prompt check
     });
 

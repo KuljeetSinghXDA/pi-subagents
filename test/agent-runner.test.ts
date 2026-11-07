@@ -40,6 +40,35 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
+vi.mock("@earendil-works/pi-durable", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-durable")>();
+  return {
+    ...actual,
+    Harness: {
+      open: vi.fn(async () => ({
+        root: vi.fn(async () => ({
+          submit: vi.fn(async (input: any) => {
+            if (lastSession?.prompt) {
+              await lastSession.prompt(input.content);
+            }
+            return {
+              wait: vi.fn(async () => ({ status: "done" })),
+            };
+          }),
+          context: vi.fn(async () => ({
+            messages: lastSession?.messages ?? [],
+          })),
+          waitForIdle: vi.fn(async () => {}),
+          abort: vi.fn(async () => {
+            lastSession?.abort?.();
+          }),
+        })),
+        close: vi.fn(async () => {}),
+      })),
+    },
+  };
+});
+
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
   // Factories for pi's built-in extensions; each returns a tagged stub so the

@@ -5,6 +5,7 @@
  */
 
 export * from "./runner/durable-runner.js";
+export * from "./runner/durable-tool-bridge.js";
 export * from "./runner/extension-scope.js";
 export * from "./runner/runner-helpers.js";
 export * from "./runner/runner-resume.js";
