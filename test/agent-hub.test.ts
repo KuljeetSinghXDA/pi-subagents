@@ -929,6 +929,25 @@ describe("agent hub roster", () => {
     expect(notify).toHaveBeenCalledWith('Paused "Sleep then report 1".', "info");
   });
 
+  it("shows p resume on paused agents across roster, log, and activity views", () => {
+    const h = harness([makeRecord({ id: "a1", status: "paused" })]);
+    h.open();
+    // Roster view
+    expect(h.frame().join("\n")).toContain("p resume");
+
+    // Single agent log view (SL)
+    h.press("l");
+    expect(h.frame().join("\n")).toContain("p resume agent");
+
+    // Back to roster
+    h.press("\x1b"); // Esc
+    expect(h.frame().join("\n")).toContain("p resume");
+
+    // Activity view
+    h.press("2");
+    expect(h.frame().join("\n")).toContain("p resume");
+  });
+
   it("p resumes a paused agent, reports a refusal as a warning", () => {
     const DOWN = "\x1b[B";
     const resumeAgent = vi.fn(() => true);
@@ -939,11 +958,13 @@ describe("agent hub roster", () => {
       { resumeAgent, pauseAgent, notify },
     );
     h.open();
+    expect(h.frame().join("\n")).toContain("p resume");
     h.press("p"); // a1 is paused → resume
     expect(resumeAgent).toHaveBeenCalledWith("a1");
     expect(notify).toHaveBeenCalledWith('Resuming "Sleep then report 1".', "info");
 
     h.press(DOWN); // a2 is running → pause refused
+    expect(h.frame().join("\n")).toContain("p pause");
     h.press("p");
     expect(pauseAgent).toHaveBeenCalledWith("a2");
     expect(notify).toHaveBeenCalledWith('Cannot pause "Sleep then report 1" — worktree-isolated runs cannot pause.', "warning");

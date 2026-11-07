@@ -2,6 +2,7 @@
  * hub-footer.ts — Footer band building for AgentHub.
  */
 
+import type { AgentRecord } from "../../types.js";
 import type { Theme } from "../agent-widget.js";
 import type { FleetWorkflow } from "../fleet-list.js";
 import { type FooterHint, footerBand } from "../window-frame.js";
@@ -29,6 +30,7 @@ export interface PageFooterInput {
   detailOpen: boolean;
   theme: Theme;
   scopeParentName?: string;
+  selectedAgentStatus?: AgentRecord["status"];
 }
 
 export function buildPageFooter(input: PageFooterInput): string {
@@ -46,11 +48,12 @@ export function buildPageFooter(input: PageFooterInput): string {
     popup,
     detailOpen,
     theme,
+    selectedAgentStatus,
   } = input;
 
   const keys = page === "R" && runRowSelected ? R_RUN_KEYS : PAGE_KEYS[page];
   const expanded = transcriptPage && (viewerBand?.expanded ?? false);
-  const actions = expanded
+  let actions = expanded
     ? [...keys.actions.filter(action => action !== TD_REPLACED_ACTION), ...TD_ACTIONS]
     : [...keys.actions];
 
@@ -63,7 +66,19 @@ export function buildPageFooter(input: PageFooterInput): string {
     if (runAgentActionKeys.retry) actions.push("r retry");
   }
 
-  const hints = expanded ? keys.hints.filter(hint => hint !== TD_DROPPED_HINT) : [...keys.hints];
+  let hints = expanded ? keys.hints.filter(hint => hint !== TD_DROPPED_HINT) : [...keys.hints];
+  if (selectedAgentStatus === "paused") {
+    actions = actions.map(action => {
+      if (action === "p pause") return "p resume";
+      if (action === "p pause agent") return "p resume agent";
+      return action;
+    });
+    hints = hints.map(hint => {
+      if (hint === "p pause") return "p resume";
+      if (hint === "p pause agent") return "p resume agent";
+      return hint;
+    });
+  }
   const armed = stopArmed || (viewerBand?.stopArmed ?? false);
 
   const left: FooterHint[] = [];

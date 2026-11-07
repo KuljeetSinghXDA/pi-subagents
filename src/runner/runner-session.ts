@@ -27,7 +27,12 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import {
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+} from "@earendil-works/pi-durable/tools";
 import {
   BUILTIN_TOOL_NAMES,
   getAgentConfig,
@@ -614,8 +619,123 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
 
   // Durable Registry setup
   const registry = createRegistry();
-  // Option B: Install CodingTools from @earendil-works/pi-durable/tools
-  registry.install(CodingTools);
+  // Option B: Install CodingTools with live activity forwarding
+  const rawCodingTools = [
+    createReadTool(),
+    createWriteTool(),
+    createEditTool(),
+    createBashTool(),
+  ];
+  const codingTools = rawCodingTools.map((tool) => {
+    const origExecute = tool.execute.bind(tool);
+    return {
+      ...tool,
+      execute: async (input: any, api: any, context: any) => {
+        const lastAssistant = [...session.messages].reverse().find((m: any) => m.role === "assistant") as any;
+        const pendingCall = lastAssistant?.content?.find(
+          (c: any) =>
+            c.type === "toolCall" &&
+            c.name === tool.name &&
+            !session.messages.some((m: any) => m.role === "toolResult" && m.toolCallId === (c.id ?? c.toolUseId)),
+        );
+        const callId = api?.callId ?? pendingCall?.id ?? pendingCall?.toolUseId ?? `tool_${Date.now()}`;
+
+        if ((session as any).agent?.beforeToolCall) {
+          await (session as any).agent.beforeToolCall(
+            { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input } },
+            options.signal,
+          );
+        }
+        if (options.signal?.aborted) {
+          throw new Error("Aborted");
+        }
+
+        options.onToolActivity?.({ type: "start", toolName: tool.name, toolCallId: callId, args: input });
+        (session as any)._emit?.({ type: "tool_execution_start", toolCallId: callId, toolName: tool.name, args: input });
+
+        let accumulatedOutput = "";
+        const wrappedApi = api
+          ? {
+              ...api,
+              output: (chunk: string, skipped?: boolean) => {
+                api.output?.(chunk, skipped);
+                if (chunk) {
+                  accumulatedOutput += chunk;
+                  (session as any)._emit?.({
+                    type: "tool_execution_update",
+                    toolCallId: callId,
+                    toolName: tool.name,
+                    args: input,
+                    partialResult: {
+                      content: [{ type: "text", text: accumulatedOutput }],
+                    },
+                  });
+                }
+              },
+            }
+          : api;
+
+        let toolResult: any;
+        try {
+          const res = await origExecute(input, wrappedApi, context);
+          let content: any[] = [];
+          if (Array.isArray((res as any)?.output)) {
+            content = (res as any).output;
+          } else if (typeof (res as any)?.output === "string") {
+            content = [{ type: "text", text: (res as any).output }];
+          } else if (typeof (res as any)?.structuredOutput?.output === "string") {
+            content = [{ type: "text", text: (res as any).structuredOutput.output }];
+          } else if (typeof api?.retainedOutput === "function" && api.retainedOutput()?.text) {
+            content = [{ type: "text", text: api.retainedOutput().text }];
+          } else if (accumulatedOutput) {
+            content = [{ type: "text", text: accumulatedOutput }];
+          } else if (typeof res === "string") {
+            content = [{ type: "text", text: res }];
+          }
+
+          const details = (res as any)?.details ?? (res as any)?.structuredOutput;
+          const isError = (res as any)?.isError === true;
+          toolResult = {
+            role: "toolResult" as const,
+            toolCallId: callId,
+            toolName: tool.name,
+            content,
+            details,
+            isError,
+            timestamp: Date.now(),
+          };
+          session.messages.push(toolResult as any);
+          (session as any)._emit?.({ type: "message_start", message: toolResult });
+          (session as any)._emit?.({ type: "message_end", message: toolResult });
+          return res;
+        } catch (err: any) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          toolResult = {
+            role: "toolResult" as const,
+            toolCallId: callId,
+            toolName: tool.name,
+            content: [{ type: "text", text: errorMsg }],
+            isError: true,
+            timestamp: Date.now(),
+          };
+          session.messages.push(toolResult as any);
+          (session as any)._emit?.({ type: "message_start", message: toolResult });
+          (session as any)._emit?.({ type: "message_end", message: toolResult });
+          throw err;
+        } finally {
+          options.onToolActivity?.({ type: "end", toolName: tool.name, toolCallId: callId });
+          (session as any)._emit?.({
+            type: "tool_execution_end",
+            toolCallId: callId,
+            toolName: tool.name,
+            result: toolResult,
+            isError: toolResult?.isError === true,
+          });
+        }
+      },
+    };
+  });
+  registry.install(defineExtension({ name: "coding-tools", tools: codingTools as any }));
 
   // Extract all active session tools (MCP tools, extension tools, custom tools, nested subagent tools)
   const activeToolNames = session.getActiveToolNames();
@@ -636,6 +756,37 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
       durableBridgedTools.push(
         bridgePiToolToDurableTool(toolToBridge as any, {
           onActivity: options.onToolActivity,
+          beforeToolCall: (context, signal) =>
+            (session as any).agent?.beforeToolCall?.(context, signal),
+          onToolStart: (info) => {
+            (session as any)._emit?.({
+              type: "tool_execution_start",
+              toolName: info.toolName,
+              toolCallId: info.toolCallId,
+              args: info.args,
+            });
+          },
+          onToolUpdate: (info) => {
+            (session as any)._emit?.({
+              type: "tool_execution_update",
+              toolName: info.toolName,
+              toolCallId: info.toolCallId,
+              args: info.args,
+              partialResult: info.partialResult,
+            });
+          },
+          onToolResult: (resMsg) => {
+            session.messages.push(resMsg);
+            (session as any)._emit?.({ type: "message_start", message: resMsg });
+            (session as any)._emit?.({ type: "message_end", message: resMsg });
+            (session as any)._emit?.({
+              type: "tool_execution_end",
+              toolName: resMsg.toolName,
+              toolCallId: resMsg.toolCallId,
+              result: resMsg,
+              isError: resMsg.isError === true,
+            });
+          },
           signal: options.signal,
           toolContext: (callId: string) =>
             (session as any)._extensionRunner?.createToolContext(callId, options.signal) ?? ctx,
@@ -698,6 +849,136 @@ async function executeDurableAgentPrompt(
   let lastStreamError: string | undefined;
   let lastStreamErrorMessage: any | undefined;
 
+  let activeAssistantMessage: any;
+  let activeText = "";
+
+  function handleStreamChunk(event: any) {
+    if (!event) return;
+    if (event.type === "start") {
+      (session as any)._emit?.({ type: "turn_start" });
+      activeAssistantMessage = {
+        role: "assistant",
+        content: [],
+        timestamp: Date.now(),
+      };
+      session.messages.push(activeAssistantMessage);
+      activeText = "";
+      (session as any)._emit?.({ type: "message_start", message: activeAssistantMessage });
+    } else if (event.type === "thinking_delta") {
+      if (!activeAssistantMessage) {
+        activeAssistantMessage = {
+          role: "assistant",
+          content: [],
+          timestamp: Date.now(),
+        };
+        session.messages.push(activeAssistantMessage);
+      }
+      if (event.partial?.content) {
+        activeAssistantMessage.content = [...event.partial.content];
+      } else {
+        let thinkingPart = activeAssistantMessage.content.find((p: any) => p.type === "thinking");
+        if (!thinkingPart) {
+          thinkingPart = { type: "thinking", thinking: "" };
+          activeAssistantMessage.content.push(thinkingPart);
+        }
+        thinkingPart.thinking += event.delta ?? "";
+      }
+      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
+      options.onTextDelta?.("", activeText);
+    } else if (event.type === "text_delta") {
+      if (!activeAssistantMessage) {
+        activeAssistantMessage = {
+          role: "assistant",
+          content: [],
+          timestamp: Date.now(),
+        };
+        session.messages.push(activeAssistantMessage);
+      }
+      activeText += event.delta ?? "";
+      if (event.partial?.content) {
+        activeAssistantMessage.content = [...event.partial.content];
+      } else {
+        let textPart = activeAssistantMessage.content.find((p: any) => p.type === "text");
+        if (!textPart) {
+          textPart = { type: "text", text: "" };
+          activeAssistantMessage.content.push(textPart);
+        }
+        textPart.text = activeText;
+      }
+      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
+      options.onTextDelta?.(event.delta ?? "", activeText);
+    } else if (event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end") {
+      if (activeAssistantMessage && event.partial?.content) {
+        activeAssistantMessage.content = [...event.partial.content];
+      }
+      if (event.type === "toolcall_start") {
+        const item = event.partial?.content?.[event.contentIndex];
+        if (item && item.type === "toolCall") {
+          options.onToolActivity?.({
+            type: "start",
+            toolName: item.name,
+            toolCallId: item.id,
+            args: item.arguments,
+          });
+        }
+      }
+      (session as any)._emit?.({ type: "message_update", assistantMessageEvent: event });
+    } else if (event.type === "done") {
+      if (activeAssistantMessage && event.message) {
+        Object.assign(activeAssistantMessage, event.message);
+      }
+      (session as any)._emit?.({ type: "message_end", message: event.message ?? activeAssistantMessage });
+      (session as any)._emit?.({ type: "turn_end" });
+    }
+  }
+
+  function interceptEventStream(res: any) {
+    if (!res || typeof res[Symbol.asyncIterator] !== "function") return res;
+    return new Proxy(res, {
+      get(target, prop, receiver) {
+        if (prop === Symbol.asyncIterator) {
+          return () => {
+            const iter = target[Symbol.asyncIterator]();
+            let first = true;
+            return {
+              async next() {
+                if (first) {
+                  first = false;
+                  if ((session as any).agent?.finishTurn) {
+                    await (session as any).agent.finishTurn(
+                      { message: activeAssistantMessage ?? { role: "assistant", content: [] }, toolResults: [] },
+                      options.signal,
+                    );
+                  }
+                  if (options.signal?.aborted) {
+                    return { done: true, value: undefined };
+                  }
+                }
+                const item = await iter.next();
+                if (!item.done && item.value) {
+                  try {
+                    handleStreamChunk(item.value);
+                  } catch {
+                    // best effort
+                  }
+                }
+                return item;
+              },
+              return(v: any) {
+                return iter.return ? iter.return(v) : Promise.resolve({ done: true, value: v });
+              },
+              throw(e: any) {
+                return iter.throw ? iter.throw(e) : Promise.reject(e);
+              },
+            };
+          };
+        }
+        const val = Reflect.get(target, prop, receiver);
+        return typeof val === "function" ? val.bind(target) : val;
+      },
+    });
+  }
+
   for (const m of allModels) {
     if (!m?.provider) continue;
     const list = byProvider.get(m.provider) ?? [];
@@ -753,7 +1034,7 @@ async function executeDurableAgentPrompt(
           }).catch((err: any) => {
             lastStreamError = err instanceof Error ? err.message : String(err);
           });
-          return res;
+          return interceptEventStream(res);
         } catch (err: any) {
           lastStreamError = err instanceof Error ? err.message : String(err);
           throw err;
@@ -775,7 +1056,7 @@ async function executeDurableAgentPrompt(
           }).catch((err: any) => {
             lastStreamError = err instanceof Error ? err.message : String(err);
           });
-          return res;
+          return interceptEventStream(res);
         } catch (err: any) {
           lastStreamError = err instanceof Error ? err.message : String(err);
           throw err;
@@ -896,6 +1177,10 @@ async function executeDurableAgentPrompt(
           options.signal,
         );
       }
+
+      // Replace in-progress live messages with finalized committed messages
+      session.messages.splice(startIndex);
+      session.messages.push(userMessage as any);
 
       // Append newly produced messages to session and sessionManager for persistence
       for (const msg of newMessages) {

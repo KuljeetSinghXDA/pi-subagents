@@ -103,6 +103,8 @@ export async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: s
       ctx.ui.notify(`Could not pause @${name} — ${refusal}.`, "warning");
       return;
     }
+    deps.widget?.update();
+    deps.fleet?.update();
     ctx.ui.notify(`Paused @${name}.`, "info");
     return;
   }
@@ -125,6 +127,8 @@ export async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: s
     if (pauseAgentRecord(record, pi, manager) === undefined) paused++;
     else skipped++;
   }
+  deps.widget?.update();
+  deps.fleet?.update();
   ctx.ui.notify(
     `Paused ${paused} agent${paused === 1 ? "" : "s"}` +
     (captured > 0 ? `; captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue` : "") +
@@ -152,6 +156,8 @@ export async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: 
     }
     if (record.session) {
       const ok = await resumeAgentById(ctx, record, deps);
+      deps.widget?.update();
+      deps.fleet?.update();
       const queued = manager.getRecord(record.id)?.status === "queued";
       const message = !ok
         ? `Could not resume @${name}.`
@@ -162,6 +168,8 @@ export async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: 
       return;
     }
     if (await resumeAgentById(ctx, record, deps)) {
+      deps.widget?.update();
+      deps.fleet?.update();
       ctx.ui.notify(`Resumed @${name} — queued.`, "info");
       return;
     }
@@ -179,6 +187,8 @@ export async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: 
   for (const record of paused) {
     if (await resumeAgentById(ctx, record, deps)) resumed++;
   }
+  deps.widget?.update();
+  deps.fleet?.update();
   ctx.ui.notify(
     `Resumed ${resumed} of ${paused.length} agent${paused.length === 1 ? "" : "s"}.`,
     "info",

@@ -47,6 +47,8 @@ export interface PauseContinueDeps {
   isShowCostEnabled: () => boolean;
   workflowTasks?: Map<string, WorkflowTask>;
   relaunchWorkflow?: (ctx: ExtensionContext, entry: PausedWorkflowEntry) => Promise<boolean>;
+  widget?: { update: () => void; ensureTimer?: () => void };
+  fleet?: { update: () => void; ensureTimer?: () => void };
 }
 
 export function resumeAgentSession(
@@ -201,6 +203,8 @@ export async function pauseAllCommand(
     }
   }
   syncPauseManifest(ctx, park, manager, workflowTasks);
+  deps.widget?.update();
+  deps.fleet?.update();
   const parts: string[] = [];
   if (paused > 0) parts.push(`Paused ${paused} agent${paused === 1 ? "" : "s"}`);
   if (pausedWorkflows > 0) parts.push(`Paused ${pausedWorkflows} workflow run${pausedWorkflows === 1 ? "" : "s"}`);
@@ -439,6 +443,8 @@ export async function continuePausedCommand(
     }
   }
   store.replaceWorkflows(remainingWorkflows);
+  deps.widget?.update();
+  deps.fleet?.update();
 
   const parts: string[] = [];
   if (continuedMain) parts.push("Continued the parked main turn");

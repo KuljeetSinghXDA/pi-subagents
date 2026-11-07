@@ -79,4 +79,59 @@ describe("runDurableAgent", () => {
     expect(result.aborted).toBe(false);
     expect(result.session).toBeDefined();
   });
+
+  it("suspends on beforeToolCall when paused and resumes when released", async () => {
+    const ctx = createMockCtx();
+    const pi = createMockPi();
+    const storage = new MemoryStorage();
+
+    let beforeToolCallCalled = false;
+    let gateResolved = false;
+    let releaseGate!: () => void;
+    const gatePromise = new Promise<void>((resolve) => {
+      releaseGate = () => {
+        gateResolved = true;
+        resolve();
+      };
+    });
+
+    const testTool = {
+      name: "test_tool",
+      description: "A test tool",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    };
+
+    // When session is created, attach beforeToolCall (like installPauseGate does)
+    const onSessionCreated = (session: any) => {
+      session.agent.beforeToolCall = async () => {
+        beforeToolCallCalled = true;
+        await gatePromise;
+      };
+    };
+
+    // Start durable run with testTool as custom tool
+    const runPromise = runDurableAgent(ctx, "Explore", undefined, {
+      pi,
+      storage,
+      onSessionCreated,
+      tools: [testTool as any],
+    });
+
+    const runResult = await runPromise;
+    expect(runResult.session).toBeDefined();
+    expect(runResult.session.agent?.beforeToolCall).toBeDefined();
+
+    // Call beforeToolCall directly as the durable tool execution does
+    const boundaryPromise = runResult.session.agent.beforeToolCall({ toolCall: { name: "test_tool" } });
+    expect(beforeToolCallCalled).toBe(true);
+    expect(gateResolved).toBe(false);
+
+    // Release gate
+    releaseGate();
+    await boundaryPromise;
+    expect(gateResolved).toBe(true);
+  });
 });

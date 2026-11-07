@@ -6,6 +6,7 @@ import type { ParkGateController } from "../commands/pause-state.js";
 import type { CompletionOutbox } from "../completion-outbox.js";
 import { GroupJoinManager } from "../group-join.js";
 import { resolveJoinMode } from "../invocation-config.js";
+import { gateOf } from "../manager/manager-types.js";
 import { createOutputFilePath, ensureOutputFile, streamToOutputFile } from "../output-file.js";
 import type { AgentRecord, JoinMode } from "../types.js";
 import type { AgentActivity, AgentWidget } from "../ui/agent-widget.js";
@@ -82,6 +83,7 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
   };
 
   function sendIndividualNudge(record: AgentRecord) {
+    const activity = agentActivity.get(record.id);
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
@@ -89,7 +91,7 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
       const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
       const message = {
         content: formatTaskNotification(record, 500, isShowCostEnabled()) + footer,
-        details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
+        details: buildNotificationDetails(record, 500, activity),
       };
       outbox.add({ ids: [record.id], build: () => message });
     } catch { /* ignore stale completion side-effects */ }
@@ -98,11 +100,17 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
 
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
+      const activities = new Map<string, AgentActivity | undefined>();
+      for (const r of records) {
+        activities.set(r.id, agentActivity.get(r.id));
+        agentActivity.delete(r.id);
+        widget.markFinished(r.id);
+        fleet.onAgentFinished(r.id);
+      }
 
       const members = records.filter(r => !r.resultConsumed).flatMap(r => {
         try {
-          return [{ id: r.id, text: formatTaskNotification(r, 300, isShowCostEnabled()), details: buildNotificationDetails(r, 300, agentActivity.get(r.id)) }];
+          return [{ id: r.id, text: formatTaskNotification(r, 300, isShowCostEnabled()), details: buildNotificationDetails(r, 300, activities.get(r.id)) }];
         } catch { return []; }
       });
       if (members.length > 0) {
@@ -230,6 +238,7 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
     opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
   ): Promise<AgentRecord | undefined> {
     const id = existing.id;
+    const isGated = gateOf(existing)?.closed === true;
     const joinMode = resolveJoinMode(getDefaultJoinMode(), true);
     existing.toolCallId = opts.toolCallId;
     if (joinMode) existing.joinMode = joinMode;
@@ -239,15 +248,21 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
     }
     const transcriptAnchor = existing.session?.messages.length ?? 0;
 
-    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(opts.maxTurns);
-    bgState.session = existing.session;
+    let bgState = agentActivity.get(id);
+    let bgCallbacks: any;
+    if (!bgState || !isGated) {
+      const tracker = createActivityTracker(opts.maxTurns);
+      bgState = tracker.state;
+      bgCallbacks = tracker.callbacks;
+      bgState.session = existing.session;
+    }
 
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
       maxTurns: opts.maxTurns,
-      onTurnEnd: bgCallbacks.onTurnEnd,
-      onToolActivity: bgCallbacks.onToolActivity,
-      onAssistantUsage: bgCallbacks.onAssistantUsage,
+      onTurnEnd: bgCallbacks?.onTurnEnd,
+      onToolActivity: bgCallbacks?.onToolActivity,
+      onAssistantUsage: bgCallbacks?.onAssistantUsage,
       onStarted: () => {
         const rec = manager.getRecord(id);
         if (rec?.session && rec.outputFile) {
@@ -259,19 +274,23 @@ export function createManagerSetup(deps: ManagerSetupDeps) {
 
     if (opts.toolCallId !== undefined) joinTurnGroup(id, joinMode);
 
-    agentActivity.set(id, bgState);
+    if (bgState) {
+      agentActivity.set(id, bgState);
+    }
     widget.markRunning(id);
     widget.ensureTimer();
     widget.update();
     fleet.ensureTimer();
     fleet.update();
 
-    pi.events.emit("subagents:created", {
-      id,
-      type: existing.type,
-      description: existing.description,
-      isBackground: true,
-    });
+    if (!isGated) {
+      pi.events.emit("subagents:created", {
+        id,
+        type: existing.type,
+        description: existing.description,
+        isBackground: true,
+      });
+    }
 
     return record;
   }

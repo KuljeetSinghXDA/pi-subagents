@@ -440,6 +440,8 @@ export default function (pi: ExtensionAPI) {
     manager,
     park,
     agentActivity,
+    widget,
+    fleet,
     startBackgroundResume,
     spawnResolved,
     reloadCustomAgents: () => reloadCustomAgents(),

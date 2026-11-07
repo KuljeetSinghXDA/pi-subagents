@@ -14,6 +14,9 @@ check the entries below for behaviour changes.
 ### Changed
 - **BREAKING: All subagent runs execute universally through `@earendil-works/pi-durable`'s `Harness`**. Removed the opt-in `durable?: boolean` flag from `AgentConfig` and `RunOptions`. Built-in coding tools (`read`, `write`, `edit`, `bash`) are provided by `@earendil-works/pi-durable/tools`, while workspace extensions, MCP servers, and nested delegation tools (`Agent`, `get_subagent_result`, `steer_subagent`, `ask_parent`) are bridged into durable tool registrations. Legacy non-durable runner execution pathways have been retired.
 
+### Fixed
+- **Subagent window dynamically displays `p resume` / `p resume agent` when an agent is paused, and `/pause`/`/continue` respect active execution boundaries**. The footer hints across roster, log, and activity views reflect the paused status of the focused agent instead of showing a static `p pause` hint. Boundary gates in durable tool dispatch and event stream interception suspend active durable agent executions cleanly when `/pause` is issued and resume smoothly upon `/continue`.
+
 ## [2026.11.061] - 2026-11-06
 
 ### Added

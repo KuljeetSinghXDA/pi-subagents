@@ -20,6 +20,10 @@ const REPLAY_SAFE_TOOLS = new Set([
 
 export interface BridgeToolOptions {
   onActivity?: (activity: ToolActivity) => void;
+  beforeToolCall?: (context: any, signal?: AbortSignal) => Promise<any> | any;
+  onToolStart?: (info: { toolName: string; toolCallId: string; args: any }) => void;
+  onToolUpdate?: (info: { toolName: string; toolCallId: string; args: any; partialResult: any }) => void;
+  onToolResult?: (result: any) => void;
   signal?: AbortSignal;
   toolContext?: unknown | ((callId: string) => unknown);
 }
@@ -56,10 +60,25 @@ export function bridgePiToolToDurableTool(
       ? (args: unknown) => tool.prepareArguments!(args) as object
       : undefined,
     async execute(args: any, api, _chordCtx: Context) {
-      const callId = `call-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const callId = (api as any)?.callId ?? `call-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+      if (options.beforeToolCall) {
+        await options.beforeToolCall(
+          { toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args } },
+          options.signal,
+        );
+      }
+      if (options.signal?.aborted) {
+        throw new Error("Aborted");
+      }
 
       options.onActivity?.({
         type: "start",
+        toolName: tool.name,
+        toolCallId: callId,
+        args,
+      });
+      options.onToolStart?.({
         toolName: tool.name,
         toolCallId: callId,
         args,
@@ -68,6 +87,12 @@ export function bridgePiToolToDurableTool(
       try {
         const updateCallback = (partial: any) => {
           if (!partial) return;
+          options.onToolUpdate?.({
+            toolName: tool.name,
+            toolCallId: callId,
+            args,
+            partialResult: partial,
+          });
           if (typeof partial === "string") {
             api.output(partial);
           } else if (typeof partial === "object") {
@@ -106,7 +131,21 @@ export function bridgePiToolToDurableTool(
           ? (result.content as ToolResultMessage["content"])
           : typeof result?.content === "string"
             ? [{ type: "text" as const, text: result.content }]
-            : [];
+            : typeof (result as any)?.output === "string"
+              ? [{ type: "text" as const, text: (result as any).output }]
+              : Array.isArray((result as any)?.output)
+                ? (result as any).output
+                : [];
+
+        options.onToolResult?.({
+          role: "toolResult",
+          toolName: tool.name,
+          toolCallId: callId,
+          content: output,
+          details: result?.details,
+          isError: result?.isError === true,
+          timestamp: Date.now(),
+        });
 
         return {
           output,
@@ -121,6 +160,15 @@ export function bridgePiToolToDurableTool(
         });
 
         const errorMsg = err instanceof Error ? err.message : String(err);
+        options.onToolResult?.({
+          role: "toolResult",
+          toolName: tool.name,
+          toolCallId: callId,
+          content: [{ type: "text" as const, text: errorMsg }],
+          isError: true,
+          timestamp: Date.now(),
+        });
+
         return {
           output: [{ type: "text" as const, text: errorMsg }],
           isError: true,

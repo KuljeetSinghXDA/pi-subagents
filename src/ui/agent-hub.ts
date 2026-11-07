@@ -617,6 +617,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
       detailOpen: this.detailOpen,
       theme: this.theme,
       scopeParentName: this.scopeParentName(),
+      selectedAgentStatus: this.focusedRecord()?.status,
     });
   }
 
@@ -652,6 +653,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
       min: 3,
       fallbackRows: HUB_FALLBACK_ROWS - HUB_CHROME_ROWS,
     });
+    const pauseHint = this.focusedRecord()?.status === "paused" ? "p resume" : "p pause";
     return paintWindow(
       renderWindow({
         width,
@@ -662,7 +664,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
           { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
           ...buildActivityLines(rows, this.entries(), this.deps.agentActivity, this.theme),
           { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
-          { kind: "full", cells: [{ text: `↑↓ select · Enter open · x stop · p pause · 1 agents · f ${this.popup ? "full" : "popup"} · q close` }] },
+          { kind: "full", cells: [{ text: `↑↓ select · Enter open · x stop · ${pauseHint} · 1 agents · f ${this.popup ? "full" : "popup"} · q close` }] },
         ],
         ellipsis: "…",
       }),
