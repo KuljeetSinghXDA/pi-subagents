@@ -17,7 +17,9 @@ import {
  * - `globalDir`: redirected via PI_CODING_AGENT_DIR so getAgentDir() returns it.
  *   Simulates `~/.pi/agent/` — the global scope.
  * - `projectDir`: passed explicitly as cwd to load/save.
- *   Simulates the user's project root. Settings live at `<projectDir>/.pi/subagents.json`.
+ *   Simulates the user's project root. Its settings live at
+ *   `<projectDir>/.pi/subagents.json`; saves only land there when that file
+ *   already exists — see the "saveSettings write target" describe below.
  */
 describe("settings persistence", () => {
   let globalDir: string;
@@ -119,7 +121,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ fleetView: false });
     saveSettings({ fleetView: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ fleetView: true });
-    writeProject({ fleetView: "on" } as any);
+    writeGlobal({ fleetView: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
@@ -128,7 +130,7 @@ describe("settings persistence", () => {
       saveSettings({ agentMentions: mode }, projectDir);
       expect(loadSettings(projectDir)).toEqual({ agentMentions: mode });
     }
-    writeProject({ agentMentions: "on" } as any);
+    writeGlobal({ agentMentions: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // unknown mode dropped
   });
 
@@ -147,7 +149,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ rememberAgents: false });
     saveSettings({ rememberAgents: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ rememberAgents: true });
-    writeProject({ rememberAgents: "on" } as any);
+    writeGlobal({ rememberAgents: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
@@ -156,7 +158,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ uiStyle: "claude" });
     saveSettings({ uiStyle: "pi" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ uiStyle: "pi" });
-    writeProject({ uiStyle: "vintage" } as any);
+    writeGlobal({ uiStyle: "vintage" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
 
@@ -165,7 +167,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ viewerStyle: "compact" });
     saveSettings({ viewerStyle: "chat" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ viewerStyle: "chat" });
-    writeProject({ viewerStyle: "teletype" } as any);
+    writeGlobal({ viewerStyle: "teletype" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
 
@@ -174,7 +176,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
     saveSettings({ outputTranscript: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
-    writeProject({ outputTranscript: "no" } as any);
+    writeGlobal({ outputTranscript: "no" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
@@ -251,7 +253,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
     saveSettings({ worktreeIsolation: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: true });
-    writeProject({ worktreeIsolation: "off" } as any);
+    writeGlobal({ worktreeIsolation: "off" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
@@ -262,7 +264,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ reportUsage: false, showCost: false });
     // The sanitizer is an allowlist: a key it does not name is dropped, and the
     // setting silently never applies.
-    writeProject({ reportUsage: "on", showCost: 1 } as any);
+    writeGlobal({ reportUsage: "on", showCost: 1 } as any);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -271,7 +273,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ showModel: true });
     saveSettings({ showModel: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ showModel: false });
-    writeProject({ showModel: "on" } as any);
+    writeGlobal({ showModel: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -280,7 +282,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: true });
     saveSettings({ workflowsEnabled: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: false });
-    writeProject({ workflowsEnabled: "on" } as any);
+    writeGlobal({ workflowsEnabled: "on" } as any);
     // Dropped, not coerced — a truthy string must not switch the feature on.
     expect(loadSettings(projectDir)).toEqual({});
   });
@@ -292,20 +294,28 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
-  it("saveSettings writes only to the project file; global is untouched", () => {
-    writeGlobal({ maxConcurrent: 16 });
-    saveSettings({ maxConcurrent: 2 }, projectDir);
+  describe("saveSettings write target", () => {
+    it("writes the global file when the project has no settings file; no project directory is created", () => {
+      writeGlobal({ maxConcurrent: 16 });
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
 
-    // Project file contains the new value
-    expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
-    // Global file unchanged
-    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 16 });
-  });
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      // No project file — and no `.pi` directory left in the project either.
+      expect(existsSync(join(projectDir, ".pi"))).toBe(false);
+      // The save still loads back for this project (global scope).
+      expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 2 });
+    });
 
-  it("saveSettings creates <cwd>/.pi/ when missing", () => {
-    expect(existsSync(join(projectDir, ".pi"))).toBe(false);
-    saveSettings({ maxConcurrent: 4 }, projectDir);
-    expect(existsSync(projectFile())).toBe(true);
+    it("writes the project file when one already exists; global is untouched", () => {
+      writeGlobal({ maxConcurrent: 16 });
+      writeProject({ graceTurns: 5 });
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
+
+      // Project file contains the new value
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      // Global file unchanged
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 16 });
+    });
   });
 
   it("round-trips defaultMaxTurns: 0 (unlimited marker)", () => {
@@ -542,18 +552,21 @@ describe("settings persistence", () => {
   describe("save result + corrupt-file warning", () => {
     it("saveSettings returns true on success", () => {
       expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
-      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      // No project file in this cwd, so the write landed in the global file.
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
     });
 
     it("saveSettings returns false when the target dir cannot be created", () => {
-      // Place a regular file where the parent of the settings file would go —
-      // mkdirSync + writeFileSync both fail with ENOTDIR / EEXIST.
-      const filePosingAsCwd = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
-      writeFileSync(filePosingAsCwd, "");
+      // No project file, so the write targets the global file. Point the
+      // agent dir under a regular file — mkdirSync + writeFileSync both
+      // fail with ENOTDIR / EEXIST.
+      const filePosingAsParent = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
+      writeFileSync(filePosingAsParent, "");
+      process.env.PI_CODING_AGENT_DIR = join(filePosingAsParent, "agent");
       try {
-        expect(saveSettings({ maxConcurrent: 1 }, filePosingAsCwd)).toBe(false);
+        expect(saveSettings({ maxConcurrent: 1 }, projectDir)).toBe(false);
       } finally {
-        rmSync(filePosingAsCwd, { force: true });
+        rmSync(filePosingAsParent, { force: true });
       }
     });
 
@@ -928,20 +941,25 @@ describe("settings persistence", () => {
         persisted: true,
       });
       expect(toast).toEqual({ message: "Max concurrency set to 5", level: "info" });
-      // File actually written
-      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual(snapshot);
+      // File actually written — the global one, since this project has no
+      // settings file of its own (#391)
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual(snapshot);
+      expect(existsSync(projectFile())).toBe(false);
     });
 
     it("emits with persisted=false and returns warning toast on save failure", () => {
-      const filePosingAsCwd = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
-      writeFileSync(filePosingAsCwd, "");
+      // Break the global write target: with no project file, the save goes
+      // to the global file, whose dir cannot be created under a regular file.
+      const filePosingAsParent = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
+      writeFileSync(filePosingAsParent, "");
+      process.env.PI_CODING_AGENT_DIR = join(filePosingAsParent, "agent");
       const emit = vi.fn();
       try {
         const toast = saveAndEmitChanged(
           { maxConcurrent: 5 },
           "Max concurrency set to 5",
           emit,
-          filePosingAsCwd,
+          projectDir,
         );
         expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
           settings: { maxConcurrent: 5 },
@@ -952,7 +970,7 @@ describe("settings persistence", () => {
           level: "warning",
         });
       } finally {
-        rmSync(filePosingAsCwd, { force: true });
+        rmSync(filePosingAsParent, { force: true });
       }
     });
   });

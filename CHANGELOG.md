@@ -9,6 +9,10 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+- **Reject symlinked parent directories for project and local agent memory**. `resolveMemoryDir` now validates that neither `.pi` nor the memory root is a symlink, preventing repositories from redirecting persistent agent memory reads and writes outside the project root ([#431](https://github.com/tintinweb/pi-subagents/pull/431) — thanks [@Zeng-Zer](https://github.com/Zeng-Zer)).
+- **Save settings to the global configuration file when the project has no local settings file**. Adjusting settings via `/agents → Settings` in a repository without `.pi/subagents.json` writes machine-wide defaults to `~/.pi/agent/subagents.json` instead of leaving an unwanted `.pi` directory in that repository ([#419](https://github.com/tintinweb/pi-subagents/pull/419) — thanks [@xh123637](https://github.com/xh123637)).
+
 ## [2026.11.072] - 2026-11-07
 
 > **⚠️ Breaking: Universal durable subagent execution engine**
