@@ -9,7 +9,7 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
-## [2026.11.071] - 2026-11-07
+## [2026.11.072] - 2026-11-07
 
 > **⚠️ Breaking: Universal durable subagent execution engine**
 
