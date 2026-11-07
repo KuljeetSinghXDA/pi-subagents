@@ -98,7 +98,7 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
 
     if (resolved?.kind === "live") {
       const record = resolved.record;
-      const target = `@${record.alias ?? record.handle ?? mention.handle}`;
+      const target = `@${mention.handle}`;
 
       if (record.status === "running" || record.status === "queued") {
         record.resultConsumed = false;
@@ -121,7 +121,7 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
     }
 
     if (resolved?.kind === "tombstone") {
-      await reviveTombstone(ctx, resolved.entry, mention.message, "Resuming", pauseDeps);
+      await reviveTombstone(ctx, resolved.entry, mention.message, "Resuming", pauseDeps, mention.handle);
       return { action: "handled" };
     }
 

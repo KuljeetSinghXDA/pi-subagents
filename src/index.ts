@@ -481,6 +481,7 @@ export default function (pi: ExtensionAPI) {
     resumeTurnLimit,
     startBackgroundResume,
     joinTurnGroup,
+    resolveAgentRef,
   });
 
   const registeredAgentTool = withUsageReporting(agentTool, () => reportUsage, pendingUsage);

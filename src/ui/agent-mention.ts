@@ -87,9 +87,10 @@ export function mentionRoster(
   // only — both names resolve, but showing two rows for one agent reads as two
   // agents. The type handle stays addressable whether or not it is listed.
   for (const record of records) {
-    const handle = record.alias ?? record.handle!;
+    const handle = (!record.autoNamed && record.alias) ? record.alias : record.handle!;
     taken.add(handle.toLowerCase());
     if (record.handle) taken.add(record.handle.toLowerCase());
+    if (record.alias) taken.add(record.alias.toLowerCase());
     targets.push({ kind: "record", handle, record, typeLabel: displayNameOf(record.type) });
   }
 

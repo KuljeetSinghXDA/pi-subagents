@@ -54,7 +54,8 @@ describe("regular conversation viewer", () => {
       expect(before.every(line => visibleWidth(line) === 90)).toBe(true);
       expect(before.slice(1, -1).every(line => line.startsWith(" ") && line.endsWith(" "))).toBe(true);
       expect(mouse({ wheelDelta: -10 })).toMatchObject({ handled: false });
-      expect(render()).toEqual(before);
+      const normalize = (lines: string[]) => lines.map((l, i) => i === 1 ? l.replace(/\d+\.\d+s/, "0.0s") : l);
+      expect(normalize(render())).toEqual(normalize(before));
       viewer.handleInput("\x1b[H");
       expect(render().join("\n")).toContain("row-000");
       expect(render().join("\n")).not.toContain("Ctrl+End");

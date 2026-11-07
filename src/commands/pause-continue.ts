@@ -589,9 +589,10 @@ export async function reviveTombstone(
   prompt: string | undefined,
   verb: string,
   deps: PauseContinueDeps,
+  targetName?: string,
 ): Promise<boolean> {
   const { manager, reloadCustomAgents, spawnResolved } = deps;
-  const target = `@${entry.alias ?? entry.handle}`;
+  const target = `@${targetName ?? ((!entry.autoNamed && entry.alias) ? entry.alias : (entry.handle ?? entry.alias))}`;
 
   reloadCustomAgents();
   const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);

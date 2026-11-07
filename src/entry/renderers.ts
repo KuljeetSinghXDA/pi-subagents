@@ -109,13 +109,17 @@ export function formatTaskNotification(record: AgentRecord, resultMaxLen: number
       : record.result
     : "No output.";
 
+  const nameXml = record.alias ? `<agent-name>${escapeXml(record.alias)}</agent-name>` : null;
+  const agentLabel = record.alias ? `Agent "${escapeXml(record.alias)}" (${escapeXml(record.description)})` : `Agent "${escapeXml(record.description)}"`;
+
   return [
     `<task-notification>`,
     `<task-id>${record.id}</task-id>`,
+    nameXml,
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>${agentLabel} ${record.status}${getStatusNote(record.status)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${costXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,

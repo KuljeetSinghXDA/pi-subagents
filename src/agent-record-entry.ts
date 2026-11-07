@@ -42,6 +42,7 @@ export interface AgentRecordEntryData {
   /** Names to give back to the reopened agent, as the `@handle` path does. */
   handle?: string;
   alias?: string;
+  autoNamed?: boolean;
   /** Set when the agent's work lived in a worktree that is now gone — see {@link worktreeLost}. */
   worktreeLost?: boolean;
 }
@@ -73,6 +74,7 @@ export function agentRecordEntryData(record: AgentRecord): AgentRecordEntryData 
     sessionFile: record.sessionFile,
     handle: record.handle,
     alias: record.alias,
+    autoNamed: record.autoNamed,
     worktreeLost: worktreeLost(record) || undefined,
   };
 }
@@ -126,7 +128,7 @@ export function findAgentRecordEntry(
 
 /** `get_subagent_result`'s answer from a persisted record, once the live record is gone. */
 export function formatSavedAgentRecord(saved: AgentRecordEntryData): string {
-  return `Agent: ${saved.id}\n` +
+  return `Agent: ${saved.id}${saved.alias ? ` (${saved.alias})` : ""}\n` +
     `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +

@@ -17,7 +17,7 @@ import { pauseWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { escapeXml } from "../xml.js";
 
 export function recordName(record: AgentRecord): string {
-  return record.alias ?? record.handle ?? record.id;
+  return (!record.autoNamed && record.alias) ? record.alias : (record.handle ?? record.alias ?? record.id);
 }
 
 export class ParkGateController {

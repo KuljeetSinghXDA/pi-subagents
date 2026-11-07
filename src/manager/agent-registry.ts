@@ -66,6 +66,7 @@ export class AgentRegistry {
     this.tombstones.set(record.handle, {
       handle: record.handle,
       alias: record.alias,
+      autoNamed: record.autoNamed,
       id: record.id,
       type: record.type,
       description: record.description,

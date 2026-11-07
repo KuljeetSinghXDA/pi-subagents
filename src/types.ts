@@ -134,6 +134,7 @@ export type AgentMentionMode = 'model' | 'direct' | 'off';
 export interface AgentTombstone {
   handle: string;
   alias?: string;
+  autoNamed?: boolean;
   id: string;
   type: SubagentType;
   description: string;
@@ -206,6 +207,7 @@ export interface AgentRecord {
    * by its type and `@explore` never comes to mean "start another one".
    */
   alias?: string;
+  autoNamed?: boolean;
   description: string;
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "paused";
   result?: string;

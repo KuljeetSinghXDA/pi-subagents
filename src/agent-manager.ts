@@ -174,7 +174,8 @@ export class AgentManager {
       // Reclaimed here, or filled in below from `name` — in which case it must
       // see the handle this record just took, since both come out of the same
       // namespace.
-      alias: isTopLevelAgent(options) ? this.reclaimable(options.reclaim?.alias, options.reclaim?.id) : undefined,
+      alias: !isTopLevelAgent(options) ? undefined : this.reclaimable(options.reclaim?.alias, options.reclaim?.id),
+      autoNamed: !isTopLevelAgent(options) ? undefined : options.autoNamed,
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
       startedAt: Date.now(),
@@ -198,8 +199,10 @@ export class AgentManager {
       spawnPrompt: prompt,
     };
     this.registry.agents.set(id, record);
-    if (record.handle !== undefined && record.alias === undefined && options.name !== undefined) {
-      record.alias = assignHandle(handleBase(options.name), this.registry.takenHandles());
+    if (record.alias === undefined && isTopLevelAgent(options)) {
+      if (options.name !== undefined && options.name.trim() !== "") {
+        record.alias = assignHandle(handleBase(options.name), this.registry.takenHandles());
+      }
     }
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
@@ -696,6 +699,10 @@ export class AgentManager {
       if (pending.length === 0) break;
       await Promise.allSettled(pending);
     }
+  }
+
+  takenHandles(): ReadonlySet<string> {
+    return this.registry.takenHandles();
   }
 
   async dispose(pi?: ExtensionAPI): Promise<void> {

@@ -93,7 +93,7 @@ export async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: s
       ctx.ui.notify(`No active agent named @${target.replace(/^@/, "")}.`, "warning");
       return;
     }
-    const name = recordName(record);
+    const name = target.startsWith("@") ? target.slice(1) : recordName(record);
     if (record.status !== "running" && record.status !== "queued") {
       ctx.ui.notify(`@${name} is not active (${record.status}).`, "warning");
       return;
@@ -144,12 +144,13 @@ export async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: 
     const record = resolved && "record" in resolved ? resolved.record : undefined;
     if (!record) {
       const tombstone = resolved && "tombstone" in resolved ? resolved.tombstone : undefined;
+      const targetName = target.replace(/^@/, "");
       ctx.ui.notify(tombstone
-        ? `@${tombstone.alias ?? tombstone.handle} was evicted — use /agents revive.`
-        : `No agent named @${target.replace(/^@/, "")}.`, "warning");
+        ? `@${targetName} was evicted — use /agents revive.`
+        : `No agent named @${targetName}.`, "warning");
       return;
     }
-    const name = recordName(record);
+    const name = target.startsWith("@") ? target.slice(1) : recordName(record);
     if (record.status === "running" || record.status === "queued") {
       ctx.ui.notify(`@${name} is already active.`, "warning");
       return;
@@ -207,7 +208,7 @@ export async function reviveAgentsCommand(ctx: ExtensionCommandContext, target: 
         : `No evicted agent named @${target.replace(/^@/, "")}.`, "warning");
       return;
     }
-    await reviveTombstone(ctx, tombstone, undefined, "Reviving", deps);
+    await reviveTombstone(ctx, tombstone, undefined, "Reviving", deps, target.replace(/^@/, ""));
     return;
   }
 
@@ -220,7 +221,7 @@ export async function reviveAgentsCommand(ctx: ExtensionCommandContext, target: 
     ctx.ui,
     "Revive evicted agent",
     tombstones,
-    t => `@${t.alias ?? t.handle} — ${t.description}`,
+    t => `@${(!t.autoNamed && t.alias) ? t.alias : (t.handle ?? t.alias)} — ${t.description}`,
   );
   if (entry) await reviveTombstone(ctx, entry, undefined, "Reviving", deps);
 }

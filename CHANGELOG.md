@@ -11,6 +11,9 @@ check the entries below for behaviour changes.
 
 > **⚠️ Breaking: Universal durable subagent execution engine**
 
+### Added
+- **Automatic Docker-style agent naming and name-based resumption**. When an agent is spawned without an explicit `name`, a two-word Docker container-style name (e.g. `bold-curie`, `quick-lamport`) is automatically assigned and announced in tool results (`Agent Name: <name>`). Subagents can be inspected, steered, and resumed using this name directly via `Agent({ resume: "<name>" })`, `get_subagent_result`, or `steer_subagent`.
+
 ### Changed
 - **Retired above-editor widget mode in favor of auto-expanding FleetView with Claude Code-style nested subagent trees**. The `widgetMode` setting (`all` | `background` | `off`) and the `aboveEditor` agent widget have been removed in favor of FleetView (`belowEditor`), with status bar counts preserved. FleetView auto-expands by default when agents are active, re-expands upon agent additions or removals if previously dismissed, increases the visible agent window to 10 rows, and renders nested subagents in a hierarchical branch tree (`├─ ` / `└─ `).
 - **BREAKING: All subagent runs execute universally through `@earendil-works/pi-durable`'s `Harness`**. Removed the opt-in `durable?: boolean` flag from `AgentConfig` and `RunOptions`. Built-in coding tools (`read`, `write`, `edit`, `bash`) are provided by `@earendil-works/pi-durable/tools`, while workspace extensions, MCP servers, and nested delegation tools (`Agent`, `get_subagent_result`, `steer_subagent`, `ask_parent`) are bridged into durable tool registrations. Legacy non-durable runner execution pathways have been retired.

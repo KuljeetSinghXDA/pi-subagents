@@ -59,7 +59,7 @@ export function createGetResultTool(deps: InspectToolsDeps) {
     promptSnippet: "Check status and retrieve results from a background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to check. The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: 'The agent name (e.g. "bold-curie") or ID to check. Also accepts type handles like "@explore".',
       }),
       wait: Type.Optional(
         Type.Boolean({
@@ -120,7 +120,7 @@ export function createGetResultTool(deps: InspectToolsDeps) {
       statsParts.push(`Duration: ${duration}`);
 
       const header =
-        `Agent: ${record.id}\n` +
+        `Agent: ${record.id}${record.alias ? ` (${record.alias})` : ""}\n` +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
@@ -186,7 +186,7 @@ export function createSteerTool(deps: InspectToolsDeps) {
     promptSnippet: "Send a steering message to redirect a running background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: 'The agent name (e.g. "bold-curie") or ID to steer (must be currently running). Also accepts type handles like "@explore".',
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
@@ -244,7 +244,7 @@ export function createAnswerTool(deps: InspectToolsDeps) {
     promptSnippet: "Answer a background agent's clarification question",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The asking agent's ID, from the question card. The agent's handle also works.",
+        description: 'The asking agent\'s name (e.g. "bold-curie") or ID, from the question card. Also accepts type handles.',
       }),
       question_id: Type.Optional(
         Type.String({ description: "Which question to answer. Defaults to the agent's oldest open question." }),

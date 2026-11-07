@@ -203,6 +203,7 @@ export interface SpawnArgs {
 export interface SpawnOptions {
   description: string;
   name?: string;
+  autoNamed?: boolean;
   resumeSessionFile?: string;
   /**
    * Internal capability, like `resumeSessionFile`: a forged handle would

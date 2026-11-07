@@ -3,6 +3,7 @@ import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "../agent-record-entry.js";
 import { getDefaultMaxTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES } from "../agent-runner.js";
 import { getAgentConfig, getAvailableTypes, resolveSpawnType, resolveType } from "../agent-types.js";
+import { generateDockerName } from "../docker-names.js";
 import { buildDetails, createActivityTracker, formatLifetimeTokens, textResult } from "../entry/renderers.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "../invocation-config.js";
 import { describeModel, resolveModel } from "../model-resolver.js";
@@ -58,6 +59,7 @@ export interface AgentToolSpawnDeps {
     opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
   ) => Promise<AgentRecord | undefined>;
   joinTurnGroup: (id: string, joinMode: JoinMode | undefined) => void;
+  resolveAgentRef: (ref: string) => AgentRecord | undefined;
 }
 
 /** Composite dependencies for creating the Agent tool (satisfies ISP via segregated sub-interfaces). */
@@ -82,6 +84,7 @@ export function createAgentTool(deps: AgentToolDeps) {
     resumeTurnLimit,
     startBackgroundResume,
     joinTurnGroup,
+    resolveAgentRef,
   } = deps;
 
   const description = buildAgentToolDescription({
@@ -130,14 +133,16 @@ export function createAgentTool(deps: AgentToolDeps) {
       // ignores `subagent_type`, model and the rest, and runs under the agent
       // type's current definition.
       // `schedule` is left to its own branch, which refuses the combination.
-      const saved = callParams.resume !== undefined && !callParams.schedule
-        && manager.getRecord(callParams.resume) === undefined
-        ? findAgentRecordEntry(ctx, callParams.resume)
+      const resumeRef = callParams.resume;
+      const liveExisting = resumeRef !== undefined ? resolveAgentRef(resumeRef) : undefined;
+      const saved = resumeRef !== undefined && !callParams.schedule
+        && liveExisting === undefined
+        ? findAgentRecordEntry(ctx, resumeRef, true)
         : undefined;
       let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
       if (saved !== undefined) {
         const reopen = reopenTarget(saved.type, saved.sessionFile, saved.worktreeLost);
-        if (!reopen.ok) return textResult(`Agent "${saved.id}" cannot be resumed — ${reopen.reason}.`);
+        if (!reopen.ok) return textResult(`Agent "${resumeRef}" cannot be resumed — ${reopen.reason}.`);
         reopenOptions = {
           resumeSessionFile: reopen.sessionFile,
           reclaim: { id: saved.id, handle: saved.handle, alias: saved.alias },
@@ -146,12 +151,18 @@ export function createAgentTool(deps: AgentToolDeps) {
       const params: typeof callParams = saved === undefined ? callParams : {
         prompt: callParams.prompt,
         description: saved.description,
+        name: saved.alias,
         subagent_type: saved.type,
         run_in_background: callParams.run_in_background,
         max_turns: callParams.max_turns,
         isolation: undefined,
         schedule: undefined,
       };
+
+      const autoNamed = !params.name || params.name.trim() === "";
+      if (autoNamed && !params.resume) {
+        params.name = generateDockerName(manager.takenHandles?.());
+      }
 
       const rawType = params.subagent_type as SubagentType;
       const dispatch = resolveSpawnType(rawType);
@@ -302,13 +313,14 @@ export function createAgentTool(deps: AgentToolDeps) {
       }
 
       if (params.resume) {
-        const resumeId = params.resume as string;
-        const existing = manager.getRecord(resumeId);
+        const resumeRef = params.resume as string;
+        const existing = resolveAgentRef(resumeRef);
         if (!existing || !isTopLevelAgent(existing)) {
-          return textResult(`Agent not found: "${resumeId}". It may have been cleaned up.`);
+          return textResult(`Agent not found: "${resumeRef}". It may have been cleaned up.`);
         }
+        const resumeId = existing.id;
         if (!existing.session) {
-          return textResult(`Agent "${resumeId}" has no active session to resume.`);
+          return textResult(`Agent "${resumeRef}" has no active session to resume.`);
         }
         const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns as number | undefined);
 
@@ -316,7 +328,7 @@ export function createAgentTool(deps: AgentToolDeps) {
           const id = existing.id;
           if (existing.status === "running" || existing.status === "queued") {
             return textResult(
-              `Agent "${resumeId}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+              `Agent "${resumeRef}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
               `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
             );
           }
@@ -380,15 +392,18 @@ export function createAgentTool(deps: AgentToolDeps) {
 
       const backgroundResult = (id: string, record: AgentRecord | undefined) => {
         const isQueued = record?.status === "queued";
+        const agentName = record?.alias || params.name;
         return textResult(
           `${fallbackNote}Agent ${isQueued ? "queued" : reopenOptions ? "resumed from its saved session" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
+          (agentName ? `Agent Name: ${agentName}\n` : "") +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
           `\nYou will be notified when this agent completes.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+          (agentName ? `To resume this agent later, pass its name or ID to Agent with resume: "${agentName}".\n` : "") +
           `Do not duplicate this agent's work.`,
           { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
@@ -410,6 +425,7 @@ export function createAgentTool(deps: AgentToolDeps) {
         id = manager.spawn(pi, ctx, subagentType, params.prompt as string, {
           description: params.description as string,
           name: params.name as string | undefined,
+          autoNamed,
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
@@ -524,6 +540,7 @@ export function createAgentTool(deps: AgentToolDeps) {
         fgResult = await Promise.race([manager.spawnAndWait(pi, ctx, subagentType, params.prompt as string, {
           description: params.description as string,
           name: params.name as string | undefined,
+          autoNamed,
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
@@ -575,8 +592,11 @@ export function createAgentTool(deps: AgentToolDeps) {
         const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
         if (costText) statsParts.push(costText);
       }
+      const agentName = record.alias || params.name;
+      const agentHeader = agentName ? `Agent: ${agentName}\n` : "";
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
+        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n` +
+        (agentHeader ? `${agentHeader}\n` : "\n") +
         (record.result?.trim() || "No output."),
         details,
       );

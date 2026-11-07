@@ -65,7 +65,7 @@ export function buildAgentToolParams(schedulingEnabled: boolean, worktreeIsolati
     name: Type.Optional(
       Type.String({
         description:
-          'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
+          'Optional memorable name for this agent (e.g. "auth-audit"). If omitted, a Docker-style name (e.g. "bold-curie") is automatically generated and returned in the output. The agent can be addressed by this name at prompts (@name), in steer_subagent, get_subagent_result, or in resume.',
       }),
     ),
     subagent_type: Type.String({
@@ -95,7 +95,8 @@ export function buildAgentToolParams(schedulingEnabled: boolean, worktreeIsolati
     ),
     resume: Type.Optional(
       Type.String({
-        description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. The resumed run gets a fresh max_turns budget. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+        description:
+          'The agent name to resume from (e.g. "bold-curie"), or its ID. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. The resumed run gets a fresh max_turns budget. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.',
       }),
     ),
     isolated: Type.Optional(

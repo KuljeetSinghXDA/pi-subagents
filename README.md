@@ -509,13 +509,13 @@ Launch a sub-agent.
 |-----------|------|----------|-------------|
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
-| `name` | string | no | Memorable name for this agent (`auth-audit`), addressable as `@name` and accepted by `steer_subagent`/`get_subagent_result`. Additive — the type-derived handle is still assigned. Shown in the rosters instead of the type's display name |
+| `name` | string | no | Memorable name for this agent (e.g. `auth-audit`). If omitted, a Docker-style name (e.g. `bold-curie`) is automatically generated and returned. Addressable as `@name` and accepted by `steer_subagent`, `get_subagent_result`, or `resume`. Additive — the type-derived handle is still assigned. Shown in the rosters instead of the type's display name |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline, until [`ctrl+b`](#sending-a-foreground-agent-to-the-background) hands it to the background |
-| `resume` | string | no | Agent ID to resume a previous session. The resumed run gets a fresh `max_turns` budget. Works after the agent's record is evicted (about ten minutes after it finishes, once its result was read) or lost to a reload: the agent is reopened from its saved session under the same id, running under its type's current definition and never in a new worktree. Refused, with the reason, when the session was never saved, its file is gone, or it ran in a worktree that held changes (the worktree was removed when the agent finished, and its changes are on the branch named in the result) |
+| `resume` | string | no | Agent name (e.g. `bold-curie`) or ID to resume a previous session. The resumed run gets a fresh `max_turns` budget. Works after the agent's record is evicted (about ten minutes after it finishes, once its result was read) or lost to a reload: the agent is reopened from its saved session under the same id, running under its type's current definition and never in a new worktree. Refused, with the reason, when the session was never saved, its file is gone, or it ran in a worktree that held changes (the worktree was removed when the agent finished, and its changes are on the branch named in the result) |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
@@ -566,7 +566,7 @@ Check status and retrieve results from a background agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID or handle — its `name` if one was given, otherwise its type (`explore`, `explore-2`) |
+| `agent_id` | string | yes | Agent name (e.g. `bold-curie`) or ID to check. Also accepts type handles like `@explore` |
 | `wait` | boolean | no | Wait for completion |
 | `verbose` | boolean | no | Include full conversation log |
 
@@ -580,7 +580,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to steer |
+| `agent_id` | string | yes | Agent name (e.g. `bold-curie`) or ID to steer (must be currently running). Also accepts type handles like `@explore` |
 | `message` | string | yes | Message to inject into agent conversation |
 
 ### `answer_subagent`
