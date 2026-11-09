@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.11.091] - 2026-11-09
+
 > **⚠️ Breaking: the minimum supported pi version is now 1.5.0.** The extension uses the 1.5 session, model-registry, tool and prompt APIs; the previous 1.1.0 peer floor passed some surface type checks but failed the runtime integration suite. Upgrade pi before installing this release.
 
 ### Fixed
