@@ -9,6 +9,7 @@ import {
   PauseStore,
   resolvePauseStorePath,
 } from "../pause-store.js";
+import { processIsAlive } from "../process.js";
 import { countUnansweredToolCalls } from "../session-continue.js";
 import { getStatusNote } from "../status-note.js";
 import type { AgentRecord, NotificationDetails } from "../types.js";
@@ -27,6 +28,15 @@ export class ParkGateController {
   mainGate: { promise: Promise<void>; open(): void } | undefined;
   readonly heldNudges: Array<() => void> = [];
   readonly capturedSettled = new Map<string, PausedAgentEntry>();
+  private cancelCompletionNotification: ((id: string) => void) | undefined;
+
+  /**
+   * Cancel a captured agent's pending completion notification. `/pause` takes
+   * over delivery of the result, so the outbox must not deliver it too.
+   */
+  setCompletionCanceller(cancel: (id: string) => void): void {
+    this.cancelCompletionNotification = cancel;
+  }
 
   holdWhileParked(send: () => void): void {
     if (this.parkedMain) {
@@ -147,6 +157,7 @@ export class ParkGateController {
     for (const record of manager.listAgents()) {
       if (!this.isCapturableResult(record) || this.capturedSettled.has(record.id)) continue;
       this.capturedSettled.set(record.id, this.pauseEntryFor(record));
+      this.cancelCompletionNotification?.(record.id);
       captured++;
     }
     if (captured > 0) syncPauseManifest(ctx);
@@ -159,15 +170,7 @@ export class ParkGateController {
   }
 
   claimLive(claim: { pid: number } | undefined): boolean {
-    if (!claim) return false;
-    if (claim.pid <= 0) return false;
-    if (claim.pid === process.pid) return true;
-    try {
-      process.kill(claim.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+    return claim !== undefined && processIsAlive(claim.pid);
   }
 
   async landPark(
