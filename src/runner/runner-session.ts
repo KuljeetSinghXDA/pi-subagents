@@ -913,9 +913,7 @@ async function executeDurableAgentPrompt(
   // Durable owns a temporary live state view, not Pi's native execution state.
   const agentState = { ...session.agent.state };
   const stateDescriptor = Object.getOwnPropertyDescriptor(session.agent, "state");
-  Object.defineProperty(session.agent, "state", { configurable: true, get: () => agentState });
   const streamingDescriptor = Object.getOwnPropertyDescriptor(session, "isStreaming");
-  Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
   const providerResults: Promise<unknown>[] = [];
   if (agentState) {
     agentState.isStreaming = true;
@@ -1250,6 +1248,7 @@ async function executeDurableAgentPrompt(
   const originalSteer = session.agent.steer;
   const originalFollowUp = session.agent.followUp;
   const persistedEntries = new Set<EntryId>();
+  const persistedMessageOffsets = new Map<EntryId, number>();
   const committedMessages: typeof session.messages = [];
 
   async function drainCommitted() {
@@ -1259,14 +1258,20 @@ async function executeDurableAgentPrompt(
       const page = await conversation.entries({ order: "ascending" }, 200, cursor, BACKGROUND_CONTEXT);
       for (const entry of page.items) {
         if (persistedEntries.has(entry.id)) continue;
-        persistedEntries.add(entry.id);
-        if (entry.kind === "hub.history") continue;
-        if (entry.kind === "pi.compaction") clearDurableContextUsage(session);
-        for (const message of entry.model ?? []) {
-          if (message.role === "system") continue;
-          committedMessages.push(message);
-          session.sessionManager.appendMessage(message);
+        if (entry.kind !== "hub.history") {
+          if (entry.kind === "pi.compaction") clearDurableContextUsage(session);
+          const messages = entry.model ?? [];
+          for (let index = persistedMessageOffsets.get(entry.id) ?? 0; index < messages.length; index++) {
+            const message = messages[index];
+            if (message.role !== "system") {
+              session.sessionManager.appendMessage(message);
+              committedMessages.push(message);
+            }
+            persistedMessageOffsets.set(entry.id, index + 1);
+          }
         }
+        persistedEntries.add(entry.id);
+        persistedMessageOffsets.delete(entry.id);
       }
       cursor = page.next;
     } while (cursor);
@@ -1292,6 +1297,8 @@ async function executeDurableAgentPrompt(
   options.signal?.addEventListener("abort", abortListener, { once: true });
 
   try {
+    Object.defineProperty(session.agent, "state", { configurable: true, get: () => agentState });
+    Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
     conversation = await harness.root(baseContext, {
       agent: {
         model: modelRef,
@@ -1438,32 +1445,41 @@ async function executeDurableAgentPrompt(
     };
   } finally {
     acceptingInput = false;
-    await run.settleControls();
-    await Promise.all(admissions);
-    session.agent.steer = originalSteer;
-    session.agent.followUp = originalFollowUp;
-    if (options.signal?.aborted || run.aborted) abortDurable();
-    await abortPromise;
-    await Promise.all(providerResults);
-    if (stateDescriptor) Object.defineProperty(session.agent, "state", stateDescriptor);
-    else Reflect.deleteProperty(session.agent, "state");
-    if (streamingDescriptor) Object.defineProperty(session, "isStreaming", streamingDescriptor);
-    else Reflect.deleteProperty(session, "isStreaming");
-    // Raw committed entries include failed attempts and history excluded by compaction.
-    // Read with a fresh context even when the caller cancelled its own context.
-    await drainCommitted();
-    session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
-    run.unsubscribe();
-    collector.unsubscribe();
-    options.signal?.removeEventListener("abort", abortListener);
-    if (agentState) {
-      agentState.isStreaming = false;
-      agentState.streamingMessage = undefined;
-    }
     try {
-      await harness.close(BACKGROUND_CONTEXT);
-    } catch {
-      // best-effort cleanup
+      try {
+        await run.settleControls();
+      } finally {
+        await Promise.all(admissions);
+      }
+    } finally {
+      session.agent.steer = originalSteer;
+      session.agent.followUp = originalFollowUp;
+      try {
+        if (options.signal?.aborted || run.aborted) abortDurable();
+        await abortPromise;
+        await Promise.all(providerResults);
+      } finally {
+        if (stateDescriptor) Object.defineProperty(session.agent, "state", stateDescriptor);
+        else Reflect.deleteProperty(session.agent, "state");
+        if (streamingDescriptor) Object.defineProperty(session, "isStreaming", streamingDescriptor);
+        else Reflect.deleteProperty(session, "isStreaming");
+        try {
+          // Retry only messages whose append failed, with an independent context.
+          await drainCommitted();
+          session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
+        } finally {
+          run.unsubscribe();
+          collector.unsubscribe();
+          options.signal?.removeEventListener("abort", abortListener);
+          agentState.isStreaming = false;
+          agentState.streamingMessage = undefined;
+          try {
+            await harness.close(BACKGROUND_CONTEXT);
+          } catch {
+            // best-effort cleanup
+          }
+        }
+      }
     }
   }
 }

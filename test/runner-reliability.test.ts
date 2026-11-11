@@ -216,6 +216,102 @@ describe("runner reliability with real durable and Pi", () => {
     expect(persisted.some((entry) => entry.type === "message" && JSON.stringify(entry.message).includes("compact checkpoint"))).toBe(true);
   });
 
+  it("retries a failed mid-entry append without losing or duplicating messages", async () => {
+    const open = Harness.open;
+    vi.spyOn(Harness, "open").mockImplementation(async (storage, configuration, context) => {
+      const harness = await open(storage, configuration, context);
+      const root = harness.root.bind(harness);
+      vi.spyOn(harness, "root").mockImplementation(async (...args) => {
+        const conversation = await root(...args);
+        const entries = conversation.entries.bind(conversation);
+        vi.spyOn(conversation, "entries").mockImplementation(async (...query) => {
+          const page = await entries(...query);
+          return { ...page, items: page.items.map((entry) => entry.kind === "pi.assistant"
+            ? { ...entry, model: [answer("part one"), answer("part two"), answer("part three")] } : entry) };
+        });
+        return conversation;
+      });
+      return harness;
+    });
+    let session: any; let failed = false;
+    const running = start(async () => answer("done"), { onSessionCreated: (value: any) => {
+      session = value;
+      const append = value.sessionManager.appendMessage.bind(value.sessionManager);
+      vi.spyOn(value.sessionManager, "appendMessage").mockImplementation((message: any) => {
+        if (!failed && JSON.stringify(message.content).includes("part two")) {
+          failed = true;
+          throw new Error("transient disk failure");
+        }
+        return append(message);
+      });
+    } });
+    await expect(running).rejects.toThrow("transient disk failure");
+    expect(failed).toBe(true);
+    const texts = session.sessionManager.getEntries().filter((entry: any) => entry.type === "message" && entry.message.role === "assistant")
+      .map((entry: any) => entry.message.content[0].text);
+    expect(texts).toEqual(["part one", "part two", "part three"]);
+    expect(session.messages.filter((message: any) => message.role === "assistant").map((message: any) => message.content[0].text)).toEqual(texts);
+  });
+
+  it.each(["control", "persistence"])("always cleans up after %s settlement fails", async (failure) => {
+    const open = Harness.open; const closed = vi.fn();
+    vi.spyOn(Harness, "open").mockImplementation(async (storage, configuration, context) => {
+      const harness = await open(storage, configuration, context);
+      const close = harness.close.bind(harness);
+      vi.spyOn(harness, "close").mockImplementation(async (...args) => { closed(); await close(...args); });
+      return harness;
+    });
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+    const unsubscribed = vi.fn(); let subscriptions = 0;
+    let session: any; let originalSteer: unknown; let originalFollowUp: unknown;
+    let originalState: unknown; let stateDescriptor: PropertyDescriptor | undefined;
+    let streamingDescriptor: PropertyDescriptor | undefined;
+    const running = start(async (index) => index === 0 && failure === "control"
+      ? answer("", [{ type: "toolCall", id: "control-read", name: "read", arguments: { path: "missing" } }])
+      : answer("done"), { signal: controller.signal, maxTurns: 1, onSessionCreated: (value: any) => {
+      session = value;
+      originalSteer = value.agent.steer; originalFollowUp = value.agent.followUp;
+      originalState = value.agent.state;
+      stateDescriptor = Object.getOwnPropertyDescriptor(value.agent, "state");
+      streamingDescriptor = Object.getOwnPropertyDescriptor(value, "isStreaming");
+      const subscribe = value.subscribe.bind(value);
+      vi.spyOn(value, "subscribe").mockImplementation((listener: any) => {
+        subscriptions++;
+        const unsubscribe = subscribe(listener);
+        return () => { unsubscribed(); unsubscribe(); };
+      });
+      if (failure === "control") vi.spyOn(value, "steer").mockRejectedValue(new Error("control failed"));
+      else vi.spyOn(value.sessionManager, "appendMessage").mockImplementation(() => { throw new Error("persistence failed"); });
+    } });
+    await expect(running).rejects.toThrow(`${failure} failed`);
+    expect(session.agent.steer).toBe(originalSteer);
+    expect(session.agent.followUp).toBe(originalFollowUp);
+    expect(session.agent.state).toBe(originalState);
+    expect(Object.getOwnPropertyDescriptor(session.agent, "state")).toEqual(stateDescriptor);
+    expect(Object.getOwnPropertyDescriptor(session, "isStreaming")).toEqual(streamingDescriptor);
+    expect(session.isStreaming).toBe(false);
+    expect(unsubscribed).toHaveBeenCalledTimes(subscriptions);
+    expect(subscriptions).toBe(2);
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves native state untouched when opening durable storage fails", async () => {
+    vi.spyOn(Harness, "open").mockRejectedValue(new Error("storage open failed"));
+    let session: any; let state: unknown;
+    let stateDescriptor: PropertyDescriptor | undefined; let streamingDescriptor: PropertyDescriptor | undefined;
+    await expect(start(async () => answer("unused"), { onSessionCreated: (value: any) => {
+      session = value; state = value.agent.state;
+      stateDescriptor = Object.getOwnPropertyDescriptor(value.agent, "state");
+      streamingDescriptor = Object.getOwnPropertyDescriptor(value, "isStreaming");
+    } })).rejects.toThrow("storage open failed");
+    expect(session.agent.state).toBe(state);
+    expect(Object.getOwnPropertyDescriptor(session.agent, "state")).toEqual(stateDescriptor);
+    expect(Object.getOwnPropertyDescriptor(session, "isStreaming")).toEqual(streamingDescriptor);
+    expect(session.isStreaming).toBe(false);
+  });
+
   it("returns saved completed bare answers rather than empty success", async () => {
     const result = await start(async () => answer("saved"));
     const resumed = await resumeAgent(result.session, { type: "runner-test" });
