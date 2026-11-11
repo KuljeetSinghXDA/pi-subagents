@@ -7,7 +7,6 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { abortable } from "./abortable.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -17,6 +16,7 @@ import {
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { consumeTerminalResult, waitForRecord } from "./manager/wait-for-record.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
@@ -115,10 +115,10 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
 
 /**
  * Who can actually answer this child's question, computed rather than assumed:
- * the nearest ancestor whose run is live AND whose own caller is not blocked in
- * a `spawnAndWait` — a blocked ancestor takes its next turn only after this
- * child settles, so addressing it would promise a mid-run answer that cannot
- * happen (upstream #410's core defect). The chain ends at a top-level agent
+ * the nearest live ancestor not currently waiting for a nested child.
+ * Spawn-time background/blocking flags do not describe that current wait.
+ * Addressing a waiting owner would promise an answer it cannot send before
+ * the child settles. The chain ends at a top-level agent
  * (`parentAgentId === undefined`), whose owner is the main session.
  *
  * `chainBlocked` on the root result says whether the main session can only
@@ -127,13 +127,13 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
  * is blocked on. The tool text must not promise a mid-run answer then.
  */
 function resolveAnswerer(manager: NestedAgentManager, child: AgentRecord): { kind: "agent"; record: AgentRecord } | { kind: "root"; chainBlocked: boolean } {
-  const seen = new Set<string>();
+  const seen = new Set<string>([child.id]);
   let climbedBlocked = false;
   for (let id = child.parentAgentId; id !== undefined && !seen.has(id); ) {
     seen.add(id);
     const owner = manager.getRecord(id);
     if (!owner) break;
-    if (owner.status === "running" && !owner.blocking) return { kind: "agent", record: owner };
+    if (owner.status === "running" && !owner.waitingForChildren) return { kind: "agent", record: owner };
     climbedBlocked = true;
     id = owner.parentAgentId;
   }
@@ -173,6 +173,17 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   // into record.result (same reason structuredJson is kept separate).
   const footer = openQuestionsFooter(record);
   return footer ? `${noted}\n\n${footer}` : noted;
+}
+
+/** Track active waits, including parallel calls, and clear them on every exit. */
+async function whileWaiting<T>(context: NestedToolContext, action: () => Promise<T>): Promise<T> {
+  const owner = context.manager.getRecord(context.parentAgentId);
+  if (owner) owner.waitingForChildren = (owner.waitingForChildren ?? 0) + 1;
+  try {
+    return await action();
+  } finally {
+    if (owner) owner.waitingForChildren = Math.max(0, (owner.waitingForChildren ?? 1) - 1);
+  }
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -221,9 +232,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         // Frontmatter authoritative, as on the spawn path; the manager falls
         // back to the limit the child was spawned with, then the default.
-        const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
+        const resumed = await whileWaiting(context, () => context.manager.resume(params.resume!, params.prompt, signal, {
           maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
-        });
+        }));
+        if (resumed) consumeTerminalResult(resumed);
         return resumed
           ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
@@ -384,14 +396,15 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           return textResult(`Nested agent started in background. Agent ID: ${id}`);
         }
 
-        const { record } = await context.manager.spawnAndWait(
+        const { record } = await whileWaiting(context, () => context.manager.spawnAndWait(
           context.pi,
           ctx,
           resolvedType,
           params.prompt,
           { ...options, signal },
           attachTranscript,
-        );
+        ));
+        consumeTerminalResult(record);
         return textResult(formatRecord(record, "inline"), record.status === "error");
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
@@ -417,11 +430,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
       if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
-        }
-        if (record.promise) await abortable(record.promise, signal);
+        await whileWaiting(context, () => waitForRecord(record, signal));
       }
+      consumeTerminalResult(record);
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },
   });

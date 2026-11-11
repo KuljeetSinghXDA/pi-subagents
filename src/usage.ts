@@ -135,6 +135,31 @@ export type SessionStatsLike = {
 };
 export type SessionLike = { getSessionStats(): SessionStatsLike };
 
+// Durable requests do not update native session stats until persistence. Keep
+// their latest context size through completion, not a cumulative usage total.
+const durableContextPercent = new WeakMap<SessionLike, number>();
+
+/** Set current durable context usage, including both cache kinds. Invalid data clears it. */
+export function setDurableContextUsage(
+  session: SessionLike,
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number },
+  contextWindow: number,
+): void {
+  const parts = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite];
+  const tokens = parts.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0 ||
+    parts.some(value => !Number.isFinite(value) || value < 0) || !Number.isFinite(tokens)) {
+    durableContextPercent.delete(session);
+    return;
+  }
+  durableContextPercent.set(session, Math.min(100, (tokens / contextWindow) * 100));
+}
+
+/** Native resume and compaction invalidate the prior durable context size. */
+export function clearDurableContextUsage(session: SessionLike): void {
+  durableContextPercent.delete(session);
+}
+
 /**
  * Session-scoped token count: input + output + cacheWrite as reported by
  * upstream `getSessionStats().tokens` for the *current* session window.
@@ -157,11 +182,14 @@ export function getSessionTokens(session: SessionLike | undefined): number {
 }
 
 /**
- * Context-window utilization (0–100), or null when unavailable
- * (no model contextWindow, or post-compaction before the next response).
+ * Context-window utilization (0–100), or null when unavailable.
+ * A current durable estimate takes precedence over stale native stats, including
+ * after completion. The runner clears it before native resume or compaction.
  */
 export function getSessionContextPercent(session: SessionLike | undefined): number | null {
   if (!session) return null;
+  const estimate = durableContextPercent.get(session);
+  if (estimate !== undefined) return estimate;
   try { return session.getSessionStats().contextUsage?.percent ?? null; }
   catch { return null; }
 }

@@ -184,6 +184,15 @@ export function releaseGate(record: AgentRecord): void {
   (record as GatedRecord).pauseGate = undefined;
 }
 
+/** Count a completed tool call once, even if the runner repeats its event. */
+export function countToolUse(record: AgentRecord, activity: ToolActivity): void {
+  if (activity.type !== "end") return;
+  record.seenToolCalls ??= new Set();
+  if (activity.toolCallId && record.seenToolCalls.has(activity.toolCallId)) return;
+  record.toolUses++;
+  if (activity.toolCallId) record.seenToolCalls.add(activity.toolCallId);
+}
+
 /** One entry in the shared two-pool spawn queue. */
 export interface QueueEntry {
   id: string;

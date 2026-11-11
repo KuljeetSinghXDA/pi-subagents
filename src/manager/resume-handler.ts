@@ -2,6 +2,7 @@
  * resume-handler.ts — Resume orchestration and background continuation for AgentManager.
  */
 
+import { abortable } from "../abortable.js";
 import { resumeAgent, type ToolActivity } from "../agent-runner.js";
 import type { AgentRecord } from "../types.js";
 import { addUsage, type LifetimeUsage } from "../usage.js";
@@ -9,12 +10,14 @@ import type { AgentRegistry } from "./agent-registry.js";
 import type { ConcurrencyPool } from "./concurrency-pool.js";
 import {
   type CompactionInfo,
+  countToolUse,
   externallyHalted,
   gateOf,
   occupiesPoolSlot,
   type ResumeOptions,
   releaseGate,
 } from "./manager-types.js";
+import { consumeTerminalResult, waitForRecord } from "./wait-for-record.js";
 
 export interface ResumeDeps {
   registry: AgentRegistry;
@@ -78,36 +81,50 @@ export async function resumeRecord(
   if (!record) return undefined;
 
   const gate = gateOf(record);
-  if (gate?.closed && record.status === "queued") {
-    return record;
-  }
-  if (gate?.closed && record.status === "paused") {
-    const p = record.chargedPool;
-    if (p !== undefined && !pool.poolHasRoom(p)) {
-      record.status = "queued";
-      record.completedAt = undefined;
-      pool.queue.push({
-        id,
-        pool: p,
-        start: async () => {
-          pool.acquireSlot(record);
-          gate.open();
-          record.status = "running";
-        },
-        release: () => {},
-      });
-      return record;
+  if (gate?.closed && (record.status === "queued" || record.status === "paused")) {
+    // Queue steering before releasing the gate. Do not delay background callers
+    // on either the session's steer promise or the still-running turn.
+    if (prompt && record.session) {
+      try {
+        void record.session.steer(prompt).catch(err => console.error("[pi-subagents-hub] paused steer failed:", err));
+      } catch (err) {
+        console.error("[pi-subagents-hub] paused steer failed:", err);
+      }
     }
-    pool.acquireSlot(record);
-    gate.open();
-    record.status = "running";
-    record.completedAt = undefined;
+    if (record.status === "paused") {
+      const p = record.chargedPool;
+      record.completedAt = undefined;
+      if (p !== undefined && !pool.poolHasRoom(p)) {
+        record.status = "queued";
+        pool.queue.push({
+          id,
+          pool: p,
+          start: async () => {
+            pool.acquireSlot(record);
+            record.status = "running";
+            gate.open();
+          },
+          release: () => {},
+        });
+      } else {
+        pool.acquireSlot(record);
+        record.status = "running";
+        gate.open();
+      }
+    }
+    if (!options?.isBackground) await waitInline(record, signal, () => abort(id));
     return record;
   }
 
   const bare = record.status === "paused";
+  if (!bare && (record.status === "running" || record.status === "queued")) {
+    if (options?.isBackground) return undefined;
+    throw new Error(`Agent "${record.id}" is still ${record.status}. Wait for it to finish or steer it.`);
+  }
   if (!record.session) {
-    return unpause(id) ? record : undefined;
+    if (!unpause(id)) return undefined;
+    if (!options?.isBackground) await waitInline(record, signal, () => abort(id));
+    return record;
   }
 
   const effectivePrompt = bare ? undefined : prompt;
@@ -122,6 +139,7 @@ export async function resumeRecord(
     record.completedAt = undefined;
     record.status = "queued";
 
+    if (!pool.armQueuedAbort(record, signal, () => abort(id))) return record;
     const start = () => startResume(deps, id, record, effectivePrompt, signal, options);
     if (occupiesPoolSlot(record) && !pool.poolHasRoom("background")) {
       pool.queue.push({
@@ -134,7 +152,13 @@ export async function resumeRecord(
             record.status = "error";
             record.error = err instanceof Error ? err.message : String(err);
             record.completedAt = Date.now();
-            onComplete?.(record);
+            pool.detachParentAbort(record);
+            pool.releaseSlot(record);
+            try { onComplete?.(record); } catch (callbackError) {
+              console.error("[pi-subagents-hub] resume completion callback failed:", callbackError);
+            } finally {
+              deps.drainQueue();
+            }
           }
         },
         release: () => {},
@@ -146,6 +170,7 @@ export async function resumeRecord(
   }
 
   record.status = "running";
+  record.seenToolCalls = new Set();
   record.startedAt = Date.now();
   record.completedAt = undefined;
   record.result = undefined;
@@ -161,7 +186,7 @@ export async function resumeRecord(
     maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
     onTurnEnd: options?.onTurnEnd,
     onToolActivity: (activity: ToolActivity) => {
-      if (activity.type === "end") record.toolUses++;
+      countToolUse(record, activity);
       options?.onToolActivity?.(activity);
     },
     onTextDelta: options?.onTextDelta,
@@ -178,16 +203,39 @@ export async function resumeRecord(
     signal: abortController.signal,
   };
 
-  try {
-    settleOutcome(record, await (effectivePrompt === undefined
-      ? resumeAgent(record.session, callbacks)
-      : resumeAgent(record.session, effectivePrompt, callbacks)));
-  } catch (err) {
-    failResume(record, err);
-  }
-  pool.detachParentAbort(record);
-  abortOwnedChildren(id);
+  const session = record.session;
+  const promise = (async () => {
+    try {
+      settleOutcome(record, await (effectivePrompt === undefined
+        ? resumeAgent(session, callbacks)
+        : resumeAgent(session, effectivePrompt, callbacks)));
+    } catch (err) {
+      failResume(record, err);
+    } finally {
+      pool.detachParentAbort(record);
+      abortOwnedChildren(id);
+    }
+    return record.result ?? "";
+  })();
+  record.promise = promise;
+  await promise;
+  consumeTerminalResult(record);
   return record;
+}
+
+/** Inline continuation owns cancellation, unlike a read-only result wait. */
+async function waitInline(record: AgentRecord, signal: AbortSignal | undefined, abort: () => void): Promise<void> {
+  const onAbort = () => abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (signal?.aborted) onAbort();
+    // A gated run already has its promise, even when reopening is queued.
+    if (record.promise) await abortable(record.promise, signal);
+    else await waitForRecord(record, signal);
+    consumeTerminalResult(record);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export function startResume(
@@ -202,27 +250,25 @@ export function startResume(
   const { pool, abort, drainQueue, abortOwnedChildren, onComplete, onStart, onUsage, onCompact } = deps;
 
   record.status = "running";
+  record.seenToolCalls = new Set();
   record.startedAt = Date.now();
   if (occupiesPoolSlot(record)) {
     record.chargedPool = "background";
     pool.acquireSlot(record);
   }
-  onStart?.(record);
+  try { onStart?.(record); } catch (err) {
+    console.error("[pi-subagents-hub] resume start callback failed:", err);
+  }
 
   const abortController = new AbortController();
   record.abortController = abortController;
-  let detachParentSignal: (() => void) | undefined;
-  if (parentSignal) {
-    const onParentAbort = () => abort(id);
-    parentSignal.addEventListener("abort", onParentAbort, { once: true });
-    detachParentSignal = () => parentSignal.removeEventListener("abort", onParentAbort);
-  }
+  pool.armParentAbort(record, parentSignal, () => abort(id));
+  if (parentSignal?.aborted) abort(id);
 
   try { options.onStarted?.(); } catch { /* ignore */ }
 
   const settle = () => {
-    detachParentSignal?.();
-    detachParentSignal = undefined;
+    pool.detachParentAbort(record);
     releaseGate(record);
     if (record.outputCleanup) {
       try { record.outputCleanup(); } catch { /* ignore */ }
@@ -230,8 +276,11 @@ export function startResume(
     }
     abortOwnedChildren(id);
     pool.releaseSlot(record);
-    try { onComplete?.(record); } catch { /* ignore */ }
-    drainQueue();
+    try { onComplete?.(record); } catch (err) {
+      console.error("[pi-subagents-hub] resume completion callback failed:", err);
+    } finally {
+      drainQueue();
+    }
   };
 
   const resumeOptions = {
@@ -239,7 +288,7 @@ export function startResume(
     maxTurns: options.maxTurns ?? record.invocation?.maxTurns,
     onTurnEnd: options.onTurnEnd,
     onToolActivity: (activity: ToolActivity) => {
-      if (activity.type === "end") record.toolUses++;
+      countToolUse(record, activity);
       options.onToolActivity?.(activity);
     },
     onTextDelta: options.onTextDelta,

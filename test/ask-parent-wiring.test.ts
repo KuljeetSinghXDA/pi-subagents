@@ -78,6 +78,7 @@ const NESTED = ["Agent", "get_subagent_result", "steer_subagent", "ask_parent", 
 function fakeSession() {
   const session = {
     messages: [] as any[],
+    sessionManager: { appendMessage: vi.fn() },
     subscribe: vi.fn(() => () => {}),
     prompt: vi.fn(async () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "DONE" }] });
@@ -88,7 +89,12 @@ function fakeSession() {
     setActiveToolsByName: vi.fn(),
     getAllTools: vi.fn(() => []),
     getToolDefinition: vi.fn(() => undefined),
-    agent: {},
+    agent: {
+      peekQueuedMessages: vi.fn(() => []),
+      clearSteeringQueue: vi.fn(),
+    },
+    getSteeringMessages: vi.fn(() => []),
+    clearQueue: vi.fn(() => ({ steering: [], followUp: [] })),
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };

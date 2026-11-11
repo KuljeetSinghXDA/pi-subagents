@@ -103,6 +103,10 @@ describe("AgentManager — pause / unpause", () => {
     return { id, release };
   }
 
+  // Gate-control tests request background continuation explicitly: they inspect
+  // the live run before releasing it. Foreground completion/cancellation lives
+  // in manager-reliability.test.ts and must continue waiting for the outcome.
+
   /** The record's gate, as the manager exposes it for observation. */
   const gateOf = (id: string) => (manager.getRecord(id) as any)?.pauseGate as { closed: boolean } | undefined;
 
@@ -261,7 +265,7 @@ describe("AgentManager — pause / unpause", () => {
     expect(toolSettled).toBe(false);
     expect(turnSettled).toBe(false);
 
-    expect(await manager.resume(id)).toBeDefined();
+    expect(await manager.resume(id, undefined, undefined, { isBackground: true })).toBeDefined();
     await Promise.all([toolCall, finishTurn]);
     expect(toolSettled).toBe(true);
     expect(turnSettled).toBe(true);
@@ -441,7 +445,7 @@ describe("AgentManager — pause / unpause", () => {
       releases.get("sibling")!(runResult());
       await manager.getRecord(sibling)!.promise;
 
-      const resumed = await manager.resume(a);
+      const resumed = await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(resumed!.status).toBe("running");
       expect(gateOf(a)?.closed).toBe(false);
       expect(queuedIds()).not.toContain(a);
@@ -478,7 +482,7 @@ describe("AgentManager — pause / unpause", () => {
       const toolCall = Promise.resolve(session.agent.beforeToolCall({ toolCall: { name: "read" } }))
         .then(() => { toolSettled = true; });
 
-      const resumed = await manager.resume(a);
+      const resumed = await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(resumed!.status).toBe("queued");
       expect(gateOf(a)?.closed).toBe(true);
       expect(queuedIds()).toContain(a);
@@ -500,16 +504,16 @@ describe("AgentManager — pause / unpause", () => {
       expect(manager.getRecord(a)!.status).toBe("completed");
     });
 
-    it("a second resume() while the reopen is queued is a no-op", async () => {
+    it("a second background resume() while the reopen is queued adds no duplicate", async () => {
       manager = new AgentManager(undefined, 1);
       const { session } = gateSession();
       const releases = heldRuns({ prompt: "a", session });
       const a = await spawnControlled("a");
       manager.pause(a);
       const b = await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
 
-      const again = await manager.resume(a);
+      const again = await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(again!.status).toBe("queued");
       // Exactly one reopen is queued — a second one would open the gate twice
       // (once per drain) or, worse, fall through to a full second execution.
@@ -532,7 +536,7 @@ describe("AgentManager — pause / unpause", () => {
       const a = await spawnControlled("a");
       manager.pause(a);
       await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
 
       expect(manager.abort(a)).toBe(true);
       const record = manager.getRecord(a)!;
@@ -558,7 +562,7 @@ describe("AgentManager — pause / unpause", () => {
       const a = await spawnControlled("a");
       manager.pause(a);
       const b = await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
 
       expect(manager.abortAll()).toBeGreaterThanOrEqual(2);
       expect(manager.getRecord(a)!.status).toBe("stopped");
@@ -578,7 +582,7 @@ describe("AgentManager — pause / unpause", () => {
       const a = await spawnControlled("a");
       manager.pause(a);
       const b = await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(manager.getRecord(a)!.status).toBe("queued");
 
       // The held run dies while its reopen waits in the queue: the record is
@@ -606,7 +610,7 @@ describe("AgentManager — pause / unpause", () => {
       const a = await spawnControlled("a");
       manager.pause(a);
       const b = await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(queuedIds()).toContain(a);
 
       expect(manager.pause(a)).toBe(true);
@@ -620,7 +624,7 @@ describe("AgentManager — pause / unpause", () => {
       releases.get("b")!(runResult());
       await manager.getRecord(b)!.promise;
 
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
       expect(manager.getRecord(a)!.status).toBe("running");
       expect(gateOf(a)?.closed).toBe(false);
       expect(queuedIds().filter(id => id === a)).toHaveLength(0);
@@ -643,7 +647,7 @@ describe("AgentManager — pause / unpause", () => {
       expect(manager.getRecord(child)!.chargedPool).toBeUndefined();
       expect(manager.pause(child)).toBe(true);
 
-      await manager.resume(child);
+      await manager.resume(child, undefined, undefined, { isBackground: true });
       expect(manager.getRecord(child)!.status).toBe("running");
       expect(queuedIds()).not.toContain(child);
       expect(gateOf(child)?.closed).toBe(false);
@@ -665,7 +669,7 @@ describe("AgentManager — pause / unpause", () => {
       const a = await spawnControlled("a");
       manager.pause(a);
       const b = await spawnControlled("b");
-      await manager.resume(a);
+      await manager.resume(a, undefined, undefined, { isBackground: true });
 
       let settled = false;
       const done = manager.waitForAll().then(() => { settled = true; });

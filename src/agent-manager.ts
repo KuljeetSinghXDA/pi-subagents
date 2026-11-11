@@ -12,6 +12,7 @@ import { AgentRegistry } from "./manager/agent-registry.js";
 import { ConcurrencyPool } from "./manager/concurrency-pool.js";
 import {
   assertValidSpawnCwd,
+  countToolUse,
   createPauseGate,
   DEFAULT_MAX_CONCURRENT,
   externallyHalted,
@@ -231,16 +232,26 @@ export class AgentManager {
       () => { this.startups.delete(id); },
       (err) => {
         this.startups.delete(id);
-        if (queuedPool !== undefined) {
-          if (queuedPool === "foreground") record.resultConsumed = true;
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-          record.completedAt = Date.now();
-          this.onComplete?.(record);
-        } else {
-          this.registry.agents.delete(id);
+        // Waiters may still hold this object after it leaves the registry.
+        // Always make startup failure terminal before notifying or removing it.
+        record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+        record.completedAt = Date.now();
+        record.blocking = false;
+        this.pool.detachParentAbort(record);
+        this.pool.releaseSlot(record);
+        try {
+          if (queuedPool !== undefined) {
+            if (queuedPool === "foreground") record.resultConsumed = true;
+            this.onComplete?.(record);
+          } else {
+            this.registry.agents.delete(id);
+          }
+        } catch (callbackError) {
+          console.error("[pi-subagents-hub] startup completion callback failed:", callbackError);
+        } finally {
+          this.drainQueue();
         }
-        this.drainQueue();
         throw err;
       },
     );
@@ -304,7 +315,9 @@ export class AgentManager {
       }
     }
 
-    this.onStart?.(record);
+    try { this.onStart?.(record); } catch (err) {
+      console.error("[pi-subagents-hub] start callback failed:", err);
+    }
 
     if (options.signal?.aborted) this.abort(id);
     else this.pool.armParentAbort(record, options.signal, () => this.abort(id));
@@ -327,7 +340,7 @@ export class AgentManager {
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        countToolUse(record, activity);
         options.onToolActivity?.(activity);
       },
       onTurnEnd: options.onTurnEnd,
@@ -365,7 +378,7 @@ export class AgentManager {
         }
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
+            session.steer(msg).catch(err => console.error("[pi-subagents-hub] queued steer failed:", err));
           }
           record.pendingSteers = undefined;
         }
@@ -384,14 +397,18 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        await this.worktrees.cleanup(pi, baseCwd, record, {
-          description: options.description,
-          customCwd,
-          onBeforeWorktreeCleanup: options.onBeforeWorktreeCleanup,
-        });
+        try {
+          await this.worktrees.cleanup(pi, baseCwd, record, {
+            description: options.description,
+            customCwd,
+            onBeforeWorktreeCleanup: options.onBeforeWorktreeCleanup,
+          });
+        } catch (cleanupError) {
+          console.error("[pi-subagents-hub] worktree cleanup failed:", cleanupError);
+        }
 
         this.abortOwnedChildren(id);
-        this.settleRun(record, true);
+        this.settleRun(record);
         return responseText;
       })
       .catch(async (err) => {
@@ -407,34 +424,40 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        await this.worktrees.cleanup(pi, baseCwd, record, {
-          description: options.description,
-          customCwd,
-        });
+        try {
+          await this.worktrees.cleanup(pi, baseCwd, record, {
+            description: options.description,
+            customCwd,
+          });
+        } catch (cleanupError) {
+          console.error("[pi-subagents-hub] worktree cleanup failed:", cleanupError);
+        }
 
         this.abortOwnedChildren(id);
-        this.settleRun(record, false);
+        this.settleRun(record);
         return "";
       });
 
     record.promise = promise;
-    options.onSpawned?.(id);
+    try { options.onSpawned?.(id); } catch (err) {
+      console.error("[pi-subagents-hub] spawned callback failed:", err);
+    }
   }
 
-  private settleRun(record: AgentRecord, guardCallback: boolean): void {
+  private settleRun(record: AgentRecord): void {
     releaseGate(record);
     if (!record.isBackground) record.resultConsumed = true;
     record.blocking = false;
     const pool = record.chargedPool;
     this.pool.releaseSlot(record);
 
-    if (guardCallback) {
-      try { this.onComplete?.(record); } catch { /* ignore */ }
-    } else {
+    try {
       this.onComplete?.(record);
+    } catch (err) {
+      console.error("[pi-subagents-hub] completion callback failed:", err);
+    } finally {
+      if (record.isBackground || pool !== undefined) this.drainQueue();
     }
-
-    if (record.isBackground || pool !== undefined) this.drainQueue();
   }
 
   private abortOwnedChildren(parentId: string): void {
@@ -513,7 +536,7 @@ export class AgentManager {
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {
-      record.session.steer(message).catch(() => {});
+      record.session.steer(message).catch(err => console.error("[pi-subagents-hub] steer failed:", err));
     } else {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);
@@ -575,6 +598,8 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      if (!record.promise) record.resultConsumed = true;
+      this.pool.detachParentAbort(record);
       this.stopGatedRun(record);
       return true;
     }
@@ -671,6 +696,8 @@ export class AgentManager {
       if (!record || record.status !== "queued") continue;
       record.status = "stopped";
       record.completedAt = Date.now();
+      if (!record.promise) record.resultConsumed = true;
+      this.pool.detachParentAbort(record);
       this.stopGatedRun(record);
       count++;
     }

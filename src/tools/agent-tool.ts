@@ -6,6 +6,7 @@ import { getAgentConfig, getAvailableTypes, resolveSpawnType, resolveType } from
 import { generateDockerName } from "../docker-names.js";
 import { buildDetails, createActivityTracker, formatLifetimeTokens, textResult } from "../entry/renderers.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "../invocation-config.js";
+import { gateOf } from "../manager/manager-types.js";
 import { describeModel, resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "../output-file.js";
@@ -323,15 +324,16 @@ export function createAgentTool(deps: AgentToolDeps) {
           return textResult(`Agent "${resumeRef}" has no active session to resume.`);
         }
         const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns as number | undefined);
+        const gated = gateOf(existing)?.closed;
+        if (!gated && (existing.status === "running" || existing.status === "queued")) {
+          return textResult(
+            `Agent "${resumeRef}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+            `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+          );
+        }
 
         if (runInBackground) {
           const id = existing.id;
-          if (existing.status === "running" || existing.status === "queued") {
-            return textResult(
-              `Agent "${resumeRef}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
-              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
-            );
-          }
 
           const record = await startBackgroundResume(ctx, existing, params.prompt as string | undefined, {
             outputTranscript,

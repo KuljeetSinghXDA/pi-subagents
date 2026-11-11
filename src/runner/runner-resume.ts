@@ -5,6 +5,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { extractText } from "../context.js";
 import { continueSessionBare } from "../session-continue.js";
+import { clearDurableContextUsage } from "../usage.js";
 import {
   collectResponseText,
   finalTurnError,
@@ -34,18 +35,22 @@ export async function resumeAgent(
 ): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
   const prompt = typeof promptOrOptions === "string" ? promptOrOptions : undefined;
   const options: ResumeAgentOptions = typeof promptOrOptions === "string" ? optionsArg! : promptOrOptions;
+  clearDurableContextUsage(session);
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(options.type, options.maxTurns) });
 
   let failure: string | undefined;
+  let finalText = "";
   try {
     if (prompt !== undefined) {
       if (options.signal?.aborted !== true) await session.prompt(prompt);
     } else {
       try {
-        await continueSessionBare(session, { execute: options.execute, signal: options.signal });
+        const result = await continueSessionBare(session, { execute: options.execute, signal: options.signal });
+        finalText = result.finalText ?? "";
+        failure = result.continuationError;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);
       }
@@ -57,9 +62,9 @@ export async function resumeAgent(
   }
 
   return {
-    text: collector.getText().trim() || getLastAssistantText(session, startLen),
+    text: collector.getText().trim() || getLastAssistantText(session, startLen) || finalText,
     failure: finalTurnError(session, startLen) ?? failure,
-    aborted: run.aborted,
+    aborted: options.signal?.aborted === true || run.aborted,
     steered: run.steered,
   };
 }

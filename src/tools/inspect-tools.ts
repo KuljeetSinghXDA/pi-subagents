@@ -1,18 +1,16 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { abortable } from "../abortable.js";
 import { isTopLevelAgent } from "../agent-manager.js";
 import { findAgentRecordEntry, formatSavedAgentRecord } from "../agent-record-entry.js";
 import { getAgentConversation, SUBAGENT_TOOL_NAMES, steerAgent } from "../agent-runner.js";
-import { type CompletionOutbox, NOTIFICATION_HOLD_MS } from "../completion-outbox.js";
+import { type CompletionOutbox } from "../completion-outbox.js";
 import { formatLifetimeTokens, markdownText, textResult } from "../entry/renderers.js";
+import { consumeTerminalResult, waitForRecord } from "../manager/wait-for-record.js";
 import { formatAnswerSteer, getStatusNote, openQuestionsFooter, partialOutputSuffix } from "../status-note.js";
 import type { AgentRecord, MentionResolution } from "../types.js";
 import { formatCost, formatDuration, getDisplayName } from "../ui/agent-widget.js";
 import { getLifetimeCost, getSessionContextPercent, type PendingUsagePool } from "../usage.js";
-
-const QUEUE_WAIT_POLL_MS = Math.floor(NOTIFICATION_HOLD_MS / 4);
 
 export interface InspectToolsDeps {
   resolveAgentRef: (ref: string) => AgentRecord | undefined;
@@ -96,13 +94,7 @@ export function createGetResultTool(deps: InspectToolsDeps) {
       }
 
       if (params.wait && (record.status === "running" || record.status === "queued")) {
-        while (record.status === "queued") {
-          await abortable(
-            new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
-            signal,
-          );
-        }
-        if (record.promise) await abortable(record.promise, signal);
+        await waitForRecord(record, signal);
       }
 
       const displayName = getDisplayName(record.type);
@@ -139,8 +131,8 @@ export function createGetResultTool(deps: InspectToolsDeps) {
       const footer = record.status !== "running" && record.status !== "queued" ? openQuestionsFooter(record) : "";
       if (footer) body = `${body}\n\n${footer}`;
 
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
+      if (record.status !== "running" && record.status !== "queued" && record.status !== "paused") {
+        consumeTerminalResult(record);
         outbox.cancel(record.id);
       }
 

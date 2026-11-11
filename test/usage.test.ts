@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addUsage, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, getSessionTokens, PendingUsagePool } from "../src/usage.js";
+import { addUsage, clearDurableContextUsage, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, getSessionTokens, PendingUsagePool, setDurableContextUsage } from "../src/usage.js";
 
 // Regression for issue #38 — token semantics + context indicator
 describe("usage", () => {
@@ -22,6 +22,60 @@ describe("usage", () => {
   });
 
   describe("getSessionContextPercent", () => {
+    it("uses the latest durable response over stale native history through completion", () => {
+      const session = {
+        getSessionStats: () => ({
+          tokens: { input: 10, output: 20, cacheWrite: 5 },
+          contextUsage: { percent: 25 },
+        }),
+      };
+      setDurableContextUsage(session, { input: 1_000, output: 1_000, cacheRead: 5_000, cacheWrite: 1_000 }, 10_000);
+      expect(getSessionContextPercent(session)).toBe(80);
+      // A compacted durable request can shrink. Do not accumulate or retain a maximum.
+      setDurableContextUsage(session, { input: 100, output: 100, cacheRead: 100, cacheWrite: 9_700 }, 20_000);
+      expect(getSessionContextPercent(session)).toBe(50);
+      // Completion does not clear the valid final context when native stats lag.
+      expect(getSessionContextPercent(session)).toBe(50);
+    });
+
+    it("clears the final durable estimate for native resume and post-compaction stats", () => {
+      let percent: number | null = 25;
+      const session = {
+        // Ignore fields left by older local patches, including post-compaction.
+        __hubContextPercent: 80,
+        getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheWrite: 0 }, contextUsage: { percent } }),
+      };
+      setDurableContextUsage(session, { input: 10, output: 10, cacheRead: 40, cacheWrite: 20 }, 100);
+      clearDurableContextUsage(session); // native resume entry
+      percent = 0.1;
+      expect(getSessionContextPercent(session)).toBe(0.1);
+      percent = null; // native compaction deliberately reports unknown
+      clearDurableContextUsage(session);
+      expect(getSessionContextPercent(session)).toBeNull();
+      percent = 5;
+      expect(getSessionContextPercent(session)).toBe(5);
+    });
+
+    it.each([0, -1, NaN, Infinity])("rejects invalid context window %s instead of preserving an old estimate", contextWindow => {
+      const session = { getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 }, contextUsage: { percent: 2 } }) };
+      const usage = { input: 10, output: 10, cacheRead: 40, cacheWrite: 20 };
+      setDurableContextUsage(session, usage, 100);
+      setDurableContextUsage(session, usage, contextWindow);
+      expect(getSessionContextPercent(session)).toBe(2);
+    });
+
+    it("rejects invalid token counts and bounds valid context percentages", () => {
+      const session = { getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }) };
+      setDurableContextUsage(session, { input: 10, output: 10, cacheRead: 40, cacheWrite: 20 }, 10);
+      expect(getSessionContextPercent(session)).toBe(100);
+      for (const cacheWrite of [NaN, Infinity, -1]) {
+        setDurableContextUsage(session, { input: 10, output: 10, cacheRead: 40, cacheWrite }, 100);
+        expect(getSessionContextPercent(session)).toBeNull();
+      }
+      setDurableContextUsage(session, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, 100);
+      expect(getSessionContextPercent(session)).toBe(0);
+    });
+
     it("returns null when contextUsage is unavailable", () => {
       const session = {
         getSessionStats: () => ({ tokens: { input: 10, output: 20, cacheWrite: 5 } }),

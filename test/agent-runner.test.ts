@@ -47,7 +47,9 @@ vi.mock("@earendil-works/pi-durable", async (importOriginal) => {
     Harness: {
       open: vi.fn(async () => ({
         root: vi.fn(async () => ({
+          entries: vi.fn(async () => ({ items: (lastSession?.messages ?? []).map((message, index) => ({ id: index, kind: "pi.message", model: [message] })) })),
           submit: vi.fn(async (input: any) => {
+            if (input.type === "write") return { wait: async () => ({ status: "done" }) };
             if (lastSession?.prompt) {
               await lastSession.prompt(input.content);
             }
@@ -70,6 +72,7 @@ vi.mock("@earendil-works/pi-durable", async (importOriginal) => {
 });
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
+  convertToLlm: (messages: unknown[]) => messages,
   createAgentSession,
   // Factories for pi's built-in extensions; each returns a tagged stub so the
   // loader option can be asserted entry by entry.
@@ -216,6 +219,9 @@ function createSession(finalText: string) {
     }),
     abort: vi.fn(),
     steer: vi.fn(),
+    clearQueue: vi.fn(() => ({ steering: [], followUp: [] })),
+    getSteeringMessages: () => [],
+    sessionManager: { appendMessage: vi.fn() },
     // Stateful, so the active set reflects what the scope installer actually did
     // and `renarrow`'s no-op guard behaves as it does against real pi.
     getActiveToolNames: vi.fn(() => activeToolNames),
@@ -233,8 +239,13 @@ function createSession(finalText: string) {
     getToolDefinition: vi.fn((name: string) => mockToolDefinition(name)),
     // pi's Agent; `beforeToolCall` is an optional, assignable hook the scope
     // installer wraps to block out-of-scope calls on turn 1.
-    agent: { beforeToolCall: undefined } as {
+    agent: { beforeToolCall: undefined, steer: vi.fn(), followUp: vi.fn(), peekQueuedMessages: () => [], clearSteeringQueue: () => {}, state: { isStreaming: false, streamingMessage: undefined } } as {
       beforeToolCall?: (context: any, signal?: any) => Promise<any>;
+      steer: ReturnType<typeof vi.fn>;
+      followUp: ReturnType<typeof vi.fn>;
+      peekQueuedMessages: () => any[];
+      clearSteeringQueue: () => void;
+      state: { isStreaming: boolean; streamingMessage: any };
     },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
@@ -3265,7 +3276,7 @@ describe("agent-runner turn limits", () => {
     const { session, listeners } = createSession("OK");
     session.prompt.mockImplementation(async () => {
       for (let i = 0; i < turns; i++) {
-        for (const l of [...listeners]) l({ type: "turn_end" });
+        for (const l of [...listeners]) l({ type: "turn_end", message: { role: "assistant", content: [{ type: "toolCall", id: `call-${i}`, name: "read", arguments: {} }] } });
       }
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });

@@ -9,6 +9,7 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   type AgentSession,
+  convertToLlm,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionContext,
@@ -19,11 +20,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   type Conversation,
+  type Cursor,
   createRegistry,
   defineExtension,
+  type EntryId,
   Harness,
   MemoryStorage,
   type Registry,
+  type Submission,
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -60,6 +64,7 @@ import {
   structuredRetryPrompt,
 } from "../structured-output.js";
 import type { AgentConfig, SubagentType } from "../types.js";
+import { clearDurableContextUsage, setDurableContextUsage } from "../usage.js";
 import { bridgePiToolToDurableTool } from "./durable-tool-bridge.js";
 import {
   extensionCanonicalNames,
@@ -655,7 +660,6 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
           throw new Error("Aborted");
         }
 
-        options.onToolActivity?.({ type: "start", toolName: tool.name, toolCallId: callId, args: input });
         (session as any)._emit?.({ type: "tool_execution_start", toolCallId: callId, toolName: tool.name, args: input });
 
         let accumulatedOutput = "";
@@ -757,7 +761,6 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
           (session as any)._emit?.({ type: "message_end", message: toolResult });
           throw err;
         } finally {
-          options.onToolActivity?.({ type: "end", toolName: tool.name, toolCallId: callId });
           (session as any)._emit?.({
             type: "tool_execution_end",
             toolCallId: callId,
@@ -789,7 +792,6 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
       };
       durableBridgedTools.push(
         bridgePiToolToDurableTool(toolToBridge as any, {
-          onActivity: options.onToolActivity,
           beforeToolCall: (context, signal) =>
             (session as any).agent?.beforeToolCall?.(context, signal),
           afterToolCall: (context, signal) =>
@@ -875,6 +877,30 @@ async function executeDurableAgentPrompt(
     };
   }
 
+  clearDurableContextUsage(session);
+  // Native continuation must retain Pi's persistence, queues and usage events.
+  if (prompt === undefined) {
+    const collector = collectResponseText(session);
+    const startIndex = session.messages.length;
+    const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+    const onAbort = () => { void session.abort(); };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const result = await continueSessionBare(session, { signal: options.signal });
+      return {
+        responseText: collector.getText().trim() || getLastAssistantText(session, startIndex) || result.finalText || "",
+        session,
+        failure: finalTurnError(session, startIndex) ?? result.continuationError,
+        aborted: options.signal?.aborted === true || run.aborted,
+        steered: run.steered,
+      };
+    } finally {
+      collector.unsubscribe();
+      run.unsubscribe();
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   const models = builtinModels();
   const allModels: Model<any>[] = [
     ...(toolLoadout.model ? [toolLoadout.model] : []),
@@ -883,9 +909,14 @@ async function executeDurableAgentPrompt(
   ];
   const byProvider = new Map<string, Model<any>[]>();
   let lastStreamError: string | undefined;
-  let lastStreamErrorMessage: any | undefined;
 
-  const agentState = (session.agent as any)?._state ?? (session as any).state;
+  // Durable owns a temporary live state view, not Pi's native execution state.
+  const agentState = { ...session.agent.state };
+  const stateDescriptor = Object.getOwnPropertyDescriptor(session.agent, "state");
+  Object.defineProperty(session.agent, "state", { configurable: true, get: () => agentState });
+  const streamingDescriptor = Object.getOwnPropertyDescriptor(session, "isStreaming");
+  Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+  const providerResults: Promise<unknown>[] = [];
   if (agentState) {
     agentState.isStreaming = true;
     agentState.streamingMessage = undefined;
@@ -893,6 +924,21 @@ async function executeDurableAgentPrompt(
 
   let activeAssistantMessage: any;
   let activeText = "";
+  const accountedMessages = new WeakSet<object>();
+  function accountAssistant(message: any) {
+    if (!message || accountedMessages.has(message)) return;
+    accountedMessages.add(message);
+    const usage = message.usage;
+    if (!usage) return;
+    setDurableContextUsage(session, usage, toolLoadout.model?.contextWindow ?? ctx.model?.contextWindow ?? 0);
+    options.onAssistantUsage?.({
+      input: usage.input ?? 0,
+      output: usage.output ?? 0,
+      cacheRead: usage.cacheRead ?? 0,
+      cacheWrite: usage.cacheWrite ?? 0,
+      cost: usage.cost?.total ?? 0,
+    });
+  }
 
   function ensureActiveMessage() {
     if (!activeAssistantMessage) {
@@ -945,7 +991,7 @@ async function executeDurableAgentPrompt(
         agentState.streamingMessage = activeAssistantMessage;
       }
       (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
-      options.onTextDelta?.("", activeText);
+
     } else if (event.type === "thinking_end") {
       if (activeAssistantMessage) {
         const thinkingPart = activeAssistantMessage.content.find((p: any) => p.type === "thinking");
@@ -980,7 +1026,7 @@ async function executeDurableAgentPrompt(
         agentState.streamingMessage = activeAssistantMessage;
       }
       (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
-      options.onTextDelta?.(event.delta ?? "", activeText);
+
     } else if (event.type === "text_end") {
       if (activeAssistantMessage) {
         const textPart = activeAssistantMessage.content.find((p: any) => p.type === "text");
@@ -997,36 +1043,40 @@ async function executeDurableAgentPrompt(
       if (event.partial?.content) {
         activeAssistantMessage.content = [...event.partial.content];
       }
-      if (event.type === "toolcall_start") {
-        const item = event.partial?.content?.[event.contentIndex];
-        if (item && item.type === "toolCall") {
-          options.onToolActivity?.({
-            type: "start",
-            toolName: item.name,
-            toolCallId: item.id,
-            args: item.arguments,
-          });
-        }
-      }
       if (agentState) {
         agentState.streamingMessage = activeAssistantMessage;
       }
       (session as any)._emit?.({ type: "message_update", message: activeAssistantMessage, assistantMessageEvent: event });
-    } else if (event.type === "done") {
+    } else if (event.type === "done" || event.type === "error") {
       if (activeAssistantMessage && event.message) {
         Object.assign(activeAssistantMessage, event.message);
       }
-      const finalMsg = event.message ?? activeAssistantMessage;
+      const finalMsg = event.message ?? event.error ?? activeAssistantMessage;
       if (finalMsg && !session.messages.includes(finalMsg)) {
         session.messages.push(finalMsg);
       }
       if (agentState) {
         agentState.streamingMessage = undefined;
       }
-      (session as any)._emit?.({ type: "message_end", message: finalMsg });
-      (session as any)._emit?.({ type: "turn_end" });
+      if (finalMsg) {
+        accountAssistant(finalMsg);
+        (session as any)._emit?.({ type: "message_end", message: finalMsg });
+        (session as any)._emit?.({ type: "turn_end", message: finalMsg, toolResults: [] });
+      }
       activeAssistantMessage = undefined;
     }
+  }
+
+  function watchProviderResult(res: any) {
+    const result = res.result?.().then((message: any) => {
+      accountAssistant(message);
+      if (message?.stopReason === "error") {
+        lastStreamError = message.errorMessage ?? "provider error with no output";
+      }
+    }).catch((error: unknown) => {
+      lastStreamError = error instanceof Error ? error.message : String(error);
+    });
+    if (result) providerResults.push(result);
   }
 
   function interceptEventStream(res: any) {
@@ -1041,6 +1091,7 @@ async function executeDurableAgentPrompt(
               async next() {
                 if (first) {
                   first = false;
+                  await drainCommitted();
                   if ((session as any).agent?.finishTurn) {
                     await (session as any).agent.finishTurn(
                       { message: activeAssistantMessage ?? { role: "assistant", content: [] }, toolResults: [] },
@@ -1053,11 +1104,13 @@ async function executeDurableAgentPrompt(
                 }
                 const item = await iter.next();
                 if (!item.done && item.value) {
-                  try {
-                    handleStreamChunk(item.value);
-                  } catch {
-                    // best effort
-                  }
+                  handleStreamChunk(item.value);
+                  await run.settleControls();
+                  await Promise.all(admissions);
+                  if (admissionError) throw admissionError;
+                  // The provider boundary is before durable creates tool tasks.
+                  // Stop here too, so even immediate tool scheduling cannot race the abort commit.
+                  if (run.aborted) throw new Error("Agent turn limit reached");
                 }
                 return item;
               },
@@ -1123,14 +1176,7 @@ async function executeDurableAgentPrompt(
             : streamSimple;
         try {
           const res = streamFn(m, context, opts as any);
-          res.result?.().then((msg: any) => {
-            if (msg?.stopReason === "error") {
-              lastStreamError = msg.errorMessage ?? "provider error with no output";
-              lastStreamErrorMessage = msg;
-            }
-          }).catch((err: any) => {
-            lastStreamError = err instanceof Error ? err.message : String(err);
-          });
+          watchProviderResult(res);
           return interceptEventStream(res);
         } catch (err: any) {
           lastStreamError = err instanceof Error ? err.message : String(err);
@@ -1145,14 +1191,7 @@ async function executeDurableAgentPrompt(
             : streamSimple;
         try {
           const res = streamFn(m, context, opts as any);
-          res.result?.().then((msg: any) => {
-            if (msg?.stopReason === "error") {
-              lastStreamError = msg.errorMessage ?? "provider error with no output";
-              lastStreamErrorMessage = msg;
-            }
-          }).catch((err: any) => {
-            lastStreamError = err instanceof Error ? err.message : String(err);
-          });
+          watchProviderResult(res);
           return interceptEventStream(res);
         } catch (err: any) {
           lastStreamError = err instanceof Error ? err.message : String(err);
@@ -1170,6 +1209,9 @@ async function executeDurableAgentPrompt(
     {
       models,
       registry,
+      // No host remains to restart queued inputs after this runner returns.
+      // Settle them explicitly if a preceding run fails instead of hanging wait().
+      settings: { afterFailedRun: "withdraw" },
       env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? effectiveCwd }),
     },
     baseContext,
@@ -1183,15 +1225,70 @@ async function executeDurableAgentPrompt(
 
   let conversation: Conversation;
   let structuredRetried = false;
+  let submissionFailure: string | undefined;
 
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+  const maxTurns = resolveEffectiveMaxTurns(type, options.maxTurns);
+  let abortPromise: Promise<void> | undefined;
+  const abortDurable = () => {
+    abortPromise ??= conversation?.abort(BACKGROUND_CONTEXT).catch(() => {});
+  };
+  const run = observeRun(session, {
+    ...options,
+    maxTurns,
+    onAssistantUsage: undefined, // One shared identity guard for provider and session terminal events.
+    onAssistantMessage: accountAssistant,
+    abort: abortDurable,
+    toolBoundariesOnly: true,
+  });
   const collector = collectResponseText(session);
   const startIndex = session.messages.length;
+  const priorMessages = session.messages.slice();
+  const submissions: Submission[] = [];
+  const admissions: Promise<void>[] = [];
+  let admissionError: unknown;
+  let acceptingInput = true;
+  const originalSteer = session.agent.steer;
+  const originalFollowUp = session.agent.followUp;
+  const persistedEntries = new Set<EntryId>();
+  const committedMessages: typeof session.messages = [];
 
-  const abortListener = () => {
-    session.abort?.();
-    conversation?.abort(baseContext).catch(() => {});
+  async function drainCommitted() {
+    if (!conversation) return;
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries({ order: "ascending" }, 200, cursor, BACKGROUND_CONTEXT);
+      for (const entry of page.items) {
+        if (persistedEntries.has(entry.id)) continue;
+        persistedEntries.add(entry.id);
+        if (entry.kind === "hub.history") continue;
+        if (entry.kind === "pi.compaction") clearDurableContextUsage(session);
+        for (const message of entry.model ?? []) {
+          if (message.role === "system") continue;
+          committedMessages.push(message);
+          session.sessionManager.appendMessage(message);
+        }
+      }
+      cursor = page.next;
+    } while (cursor);
+  }
+
+  // Keep Pi's public input processing (including transformed inputs and images).
+  // Only replace the final queue destination while durable owns execution.
+  const queueInput = (message: Parameters<typeof originalSteer>[0], mode: "steer" | "followUp") => {
+    if (!acceptingInput) {
+      (mode === "steer" ? originalSteer : originalFollowUp).call(session.agent, message);
+      return;
+    }
+    const modelMessage = convertToLlm([message])[0];
+    if (modelMessage?.role !== "user") throw new Error("Queued input must be a user message");
+    const admission = conversation.submit({ type: "input", content: modelMessage.content, whenBusy: mode }, baseContext)
+      .then((submission) => { submissions.push(submission); })
+      .catch((error: unknown) => { admissionError = error; });
+    admissions.push(admission);
+    session.clearQueue();
   };
+
+  const abortListener = () => { abortDurable(); };
   options.signal?.addEventListener("abort", abortListener, { once: true });
 
   try {
@@ -1200,18 +1297,36 @@ async function executeDurableAgentPrompt(
         model: modelRef,
         thinkingLevel: (toolLoadout.thinkingLevel as any) ?? undefined,
         instructions: systemPrompt,
-        maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns),
+        // The observer supplies grace turns and aborts before hard-boundary tools.
+        maxTurns: undefined,
         cwd: effectiveCwd,
         ...(toolsFilter ? { tools: toolsFilter } : {}),
       },
     });
 
-
+    // Seed actual normalized transcript entries, retaining roles, tool arguments and images.
+    // Seeded entries are never replayed into Pi's already persisted transcript.
+    if (priorMessages.length > 0) {
+      await conversation.submit({
+        type: "write",
+        entry: { kind: "hub.history", model: convertToLlm(priorMessages) },
+      }, baseContext);
+    }
+    const steeringMode = session.agent.steeringMode;
+    const followUpMode = session.agent.followUpMode;
+    session.agent.steeringMode = "all";
+    session.agent.followUpMode = "all";
+    const pendingSteering = session.getSteeringMessages().length > 0 ? session.agent.peekQueuedMessages() : [];
+    session.agent.clearSteeringQueue();
+    const pendingFollowUp = session.agent.peekQueuedMessages();
+    session.clearQueue();
+    session.agent.steeringMode = steeringMode;
+    session.agent.followUpMode = followUpMode;
+    session.agent.steer = (message) => queueInput(message, "steer");
+    session.agent.followUp = (message) => queueInput(message, "followUp");
 
     let trimmed = "";
-    if (prompt === undefined) {
-      await continueSessionBare(session, { signal: options.signal });
-    } else {
+    {
       let effectivePrompt = prompt;
       if (options.inheritContext && !options.resumeSessionFile) {
         const parentContext = buildParentContext(ctx);
@@ -1220,16 +1335,21 @@ async function executeDurableAgentPrompt(
         }
       }
 
-      const userMessage = {
-        role: "user" as const,
-        content: [{ type: "text" as const, text: effectivePrompt }],
-        timestamp: Date.now(),
-      };
-      session.messages.push(userMessage as any);
-      session.sessionManager?.appendMessage?.(userMessage as any);
-
       const submission = await conversation.submit({ type: "input", content: effectivePrompt }, baseContext);
-      const settled = await submission.wait(baseContext);
+      submissions.push(submission);
+      for (const message of pendingSteering) queueInput(message, "steer");
+      for (const message of pendingFollowUp) queueInput(message, "followUp");
+      await submission.wait(baseContext);
+      // Initial settlement can start a successor for accepted follow-ups.
+      // Recheck admissions because input may arrive at the final-answer boundary.
+      let admitted: number;
+      do {
+        admitted = admissions.length;
+        await Promise.all(admissions);
+        if (admissionError) throw admissionError;
+        await conversation.waitForIdle(baseContext);
+      } while (admitted !== admissions.length);
+      acceptingInput = false;
 
       if (
         toolLoadout.structuredCapture !== undefined &&
@@ -1241,7 +1361,9 @@ async function executeDurableAgentPrompt(
           { type: "input", content: structuredRetryPrompt(toolLoadout.structuredCapture) },
           baseContext,
         );
+        submissions.push(retrySubmission);
         await retrySubmission.wait(baseContext);
+        await conversation.waitForIdle(baseContext);
       }
 
       const contextView = await conversation.context(baseContext);
@@ -1262,12 +1384,10 @@ async function executeDurableAgentPrompt(
       }
 
       trimmed = responseText.trim();
-      if (trimmed && options.onTextDelta) {
-        options.onTextDelta(trimmed, trimmed);
-      }
+
 
       // Check if pause gate was installed (e.g. agent paused mid-run)
-      const newMessages = messages[0]?.role === "user" ? messages.slice(1) : messages;
+      const newMessages = messages.filter((message) => message.role !== "system");
       if ((session as any).agent?.finishTurn) {
         await (session as any).agent.finishTurn(
           { message: newMessages[0] ?? { role: "assistant", content: [] }, toolResults: [] },
@@ -1275,43 +1395,13 @@ async function executeDurableAgentPrompt(
         );
       }
 
-      // Replace in-progress live messages with finalized committed messages
-      session.messages.splice(startIndex);
-      session.messages.push(userMessage as any);
-
-      // Append newly produced messages to session and sessionManager for persistence
-      for (const msg of newMessages) {
-        session.messages.push(msg as any);
-        session.sessionManager?.appendMessage?.(msg as any);
-        if (options.onAssistantUsage && (msg as any).usage) {
-          const u = (msg as any).usage;
-          options.onAssistantUsage({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheRead: u.cacheRead ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-            cost: u.cost?.total ?? (typeof u.cost === "number" ? u.cost : 0),
-          });
-        }
-      }
-
-      if (settled.status === "unanswered") {
-        if (lastStreamErrorMessage) {
-          session.messages.push(lastStreamErrorMessage);
-          session.sessionManager?.appendMessage?.(lastStreamErrorMessage);
-        } else {
-          const errText =
-            lastStreamError ?? (settled as any).detail ?? (settled as any).reason ?? "provider error with no output";
-          const failureMessage = {
-            role: "assistant" as const,
-            content: [{ type: "text" as const, text: "" }],
-            stopReason: "error" as const,
-            errorMessage: errText,
-            timestamp: Date.now(),
-          };
-          session.messages.push(failureMessage as any);
-          session.sessionManager?.appendMessage?.(failureMessage as any);
-        }
+      await drainCommitted();
+      session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
+      const settlements = await Promise.all(submissions.map((item) => item.wait(baseContext)));
+      const settled = [...settlements].reverse().find((item) => item.status === "unanswered");
+      if (settled?.status === "unanswered" && !run.aborted && !options.signal?.aborted) {
+        submissionFailure = lastStreamError ??
+          (typeof settled.detail === "string" ? settled.detail : settled.reason);
       }
     }
 
@@ -1327,7 +1417,7 @@ async function executeDurableAgentPrompt(
         : undefined;
 
     const finalError = finalTurnError(session, startIndex);
-    const failure = finalError ?? structuredFailure;
+    const failure = finalError ?? submissionFailure ?? structuredFailure;
 
     return {
       responseText: resolvedResponseText,
@@ -1338,7 +1428,31 @@ async function executeDurableAgentPrompt(
       ...(toolLoadout.structuredCapture?.json !== undefined ? { structuredJson: toolLoadout.structuredCapture.json } : {}),
       ...(structuredRetried ? { structuredRetried } : {}),
     };
+  } catch (error) {
+    if (!options.signal?.aborted && !run.aborted) throw error;
+    return {
+      responseText: collector.getText().trim() || getLastAssistantText(session, startIndex),
+      session,
+      aborted: true,
+      steered: run.steered,
+    };
   } finally {
+    acceptingInput = false;
+    await run.settleControls();
+    await Promise.all(admissions);
+    session.agent.steer = originalSteer;
+    session.agent.followUp = originalFollowUp;
+    if (options.signal?.aborted || run.aborted) abortDurable();
+    await abortPromise;
+    await Promise.all(providerResults);
+    if (stateDescriptor) Object.defineProperty(session.agent, "state", stateDescriptor);
+    else Reflect.deleteProperty(session.agent, "state");
+    if (streamingDescriptor) Object.defineProperty(session, "isStreaming", streamingDescriptor);
+    else Reflect.deleteProperty(session, "isStreaming");
+    // Raw committed entries include failed attempts and history excluded by compaction.
+    // Read with a fresh context even when the caller cancelled its own context.
+    await drainCommitted();
+    session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
     run.unsubscribe();
     collector.unsubscribe();
     options.signal?.removeEventListener("abort", abortListener);
@@ -1347,7 +1461,7 @@ async function executeDurableAgentPrompt(
       agentState.streamingMessage = undefined;
     }
     try {
-      await harness.close(baseContext);
+      await harness.close(BACKGROUND_CONTEXT);
     } catch {
       // best-effort cleanup
     }

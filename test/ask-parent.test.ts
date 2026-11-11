@@ -126,7 +126,7 @@ describe("ask_parent delivery", () => {
     const self = asker();
     const parent = steerSession();
     const mid = steerSession();
-    records.set("parent-1", record({ id: "parent-1", status: "running", blocking: true, parentAgentId: "mid-1", session: parent.session }));
+    records.set("parent-1", record({ id: "parent-1", status: "running", waitingForChildren: 1, parentAgentId: "mid-1", session: parent.session }));
     records.set("mid-1", record({ id: "mid-1", status: "running", session: mid.session }));
 
     const result = await execute(tools()[ASK], { question: "Which module?" });
@@ -141,7 +141,7 @@ describe("ask_parent delivery", () => {
   it("falls back to the root session when the whole chain is blocked", async () => {
     const self = asker();
     const blocked = steerSession();
-    records.set("parent-1", record({ id: "parent-1", status: "running", blocking: true, session: blocked.session }));
+    records.set("parent-1", record({ id: "parent-1", status: "running", waitingForChildren: 1, session: blocked.session }));
 
     const result = await execute(tools()[ASK], { question: "Which module?", assumption: "ship it" });
 
@@ -430,7 +430,7 @@ describe("question routing across the owner chain", () => {
     const childSession = steerSession();
     self.session = childSession.session;
     // Direct owner is blocked mid spawnAndWait; the grandparent is free.
-    records.set("mid-1", record({ id: "mid-1", blocking: true, parentAgentId: "grand-1" }));
+    records.set("mid-1", record({ id: "mid-1", waitingForChildren: 1, parentAgentId: "grand-1" }));
     const grand = steerSession();
     records.set("grand-1", record({ id: "grand-1", session: grand.session }));
 
@@ -451,8 +451,8 @@ describe("question routing across the owner chain", () => {
     const self = asker("mid-1");
     const childSession = steerSession();
     self.session = childSession.session;
-    records.set("mid-1", record({ id: "mid-1", blocking: true }));
-    records.set("grand-1", record({ id: "grand-1", blocking: true, parentAgentId: undefined }));
+    records.set("mid-1", record({ id: "mid-1", waitingForChildren: 1 }));
+    records.set("grand-1", record({ id: "grand-1", waitingForChildren: 1, parentAgentId: undefined }));
 
     const askResult = await execute(tools("worker-1")[ASK], { question: "Which?" });
     expect(askResult.isError ?? false).toBe(false);
@@ -477,7 +477,7 @@ describe("question routing across the owner chain", () => {
   it("an unrelated session still cannot answer", async () => {
     const self = asker();
     const grand = steerSession();
-    records.set("parent-1", record({ id: "parent-1", blocking: true }));
+    records.set("parent-1", record({ id: "parent-1", waitingForChildren: 1 }));
     records.set("grand-1", record({ id: "grand-1", session: grand.session }));
     await execute(tools("worker-1")[ASK], { question: "Which?" });
 
@@ -505,8 +505,8 @@ describe("question routing across the owner chain", () => {
 
   it("a throwing root sendMessage leaves the question open", async () => {
     const self = asker("mid-1");
-    records.set("mid-1", record({ id: "mid-1", blocking: true }));
-    records.set("grand-1", record({ id: "grand-1", blocking: true, parentAgentId: undefined }));
+    records.set("mid-1", record({ id: "mid-1", waitingForChildren: 1 }));
+    records.set("grand-1", record({ id: "grand-1", waitingForChildren: 1, parentAgentId: undefined }));
     sendMessage.mockImplementationOnce(() => {
       throw new Error("stale context");
     });
@@ -583,7 +583,7 @@ describe("adversarial hardening", () => {
     self.blocking = true;
     // Cycle: worker-1 -> mid-1 -> worker-1, every member blocked, so the walk
     // must exit on the seen-set rather than spin forever inside the tool call.
-    const mid = record({ id: "mid-1", blocking: true, parentAgentId: "worker-1" });
+    const mid = record({ id: "mid-1", waitingForChildren: 1, parentAgentId: "worker-1" });
     records.set("mid-1", mid);
 
     const result = await execute(tools("worker-1")[ASK], { question: "Which?" });

@@ -68,7 +68,7 @@ export function buildOwnIdentityLines(
   if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
   const tokens = getLifetimeTotal(record.lifetimeUsage);
   if (tokens > 0) {
-    const percent = getSessionContextPercent(activity?.session);
+    const percent = getSessionContextPercent(record.session ?? activity?.session);
     headerParts.push(formatSessionTokens(tokens, percent, th, record.compactionCount));
   }
   const cost = showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";

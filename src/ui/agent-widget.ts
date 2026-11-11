@@ -512,7 +512,7 @@ export class AgentWidget {
       // folds a hidden child's spend into. Reading the tracker while an agent
       // runs and the record once it stops made the figure jump at completion.
       const tokens = getLifetimeTotal(a.lifetimeUsage);
-      const contextPercent = getSessionContextPercent(bg?.session);
+      const contextPercent = getSessionContextPercent(a.session ?? bg?.session);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
       const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
 
