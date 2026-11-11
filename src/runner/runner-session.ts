@@ -625,7 +625,7 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
     createWriteTool(),
     createEditTool(),
     createBashTool(),
-  ];
+  ].filter((tool) => toolNames.includes(tool.name));
   const codingTools = rawCodingTools.map((tool) => {
     const origExecute = tool.execute.bind(tool);
     return {
