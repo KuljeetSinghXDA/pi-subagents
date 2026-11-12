@@ -33,6 +33,7 @@
     "typebox": "*"
   },
   "dependencies": {
+    "@earendil-works/chord": "^1.5.0",
     "@earendil-works/pi-durable": "^1.5.0",
     "croner": "^10.0.1",
     "nanoid": "^5.1.16"
