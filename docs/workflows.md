@@ -278,7 +278,7 @@ The child runs in the *same* worker and vm context under its own globals, so it 
 - **`phase(title)`** — start a new progress group; subsequent `agent()` calls are grouped under it. Inside `pipeline`/`parallel` stages use the `phase` *option* instead, since the ambient phase races.
 - **`log(message)`** — a progress line under the tree, for you to read.
 - **`args`** — whatever was passed as the tool's `args`, verbatim; `undefined` if none.
-- **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` is real, and counts output tokens this run's agents have used.
+- **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` counts each invocation's reported output once, including attempts you retry and agents whose verification command fails to start. Resuming a child adds only its new output. Displayed token and tool totals follow the same rule and retain earlier retry attempts. A skip accepted while verification runs still returns `null`, even if the command later succeeds.
 
 ### Where files live
 

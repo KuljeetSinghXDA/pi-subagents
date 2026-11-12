@@ -134,16 +134,18 @@ export interface WorkflowSpawnResult {
   error?: string;
   /** The user dismissed it rather than it failing; renders as skipped. */
   skipped?: boolean;
+  /** Display tokens spent by this invocation, excluding earlier resumed work. */
   tokens?: number;
   /**
-   * Output tokens only, for the script's `budget.spent()`.
-   *
-   * Separate from {@link tokens}, which is the lifetime total. Claude Code's
+   * Output tokens from this invocation only, for the script's `budget.spent()`.
+   * Resumes exclude output already reported by earlier invocations.
+   * Separate from {@link tokens}, which also includes input and cache writes. Claude Code's
    * budget counts output, and a fan-out's re-sent input would swamp it.
    */
   outputTokens?: number;
   /** Whether the child needed an extra prompt to produce its structured answer. */
   structuredRetried?: boolean;
+  /** Tools executed during this invocation only. */
   toolCalls?: number;
   /**
    * Where the child actually ran.

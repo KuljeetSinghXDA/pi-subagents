@@ -430,10 +430,12 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       const key = journalKey(keyInput);
       const resumeMark = payload.resume !== undefined ? ({ resumed: true } as const) : {};
 
-      /** A skip the user asked for, before the child ever started. */
+      let tokens = 0;
+      let toolCalls = 0;
+      /** A skip before this attempt started may still follow a paid retry. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
         recordJournal?.({ index, key, ok: false, ...resumeMark });
-        emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
+        emit([{ ...base, queuedAt, ...extra, ...(tokens > 0 ? { tokens } : {}), ...(toolCalls > 0 ? { toolCalls } : {}), state: "error", skipped: true, error: "Skipped by user." }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
         // the script's `.filter(Boolean)` was already written to survive.
         respond(callId, true, null);
@@ -518,7 +520,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           live.started = true;
           inflight.add(agentId);
 
-          let result: WorkflowSpawnResult;
+          let result: WorkflowSpawnResult = { ok: false };
           /** This attempt's gate verdict, for the journal entry it settles into. */
           let gateOutcome: WorkflowJournalGate | undefined;
           try {
@@ -570,7 +572,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
               }
             }
           } catch (error) {
-            result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+            result = { ...result, ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
             inflight.delete(agentId);
             live.started = false;
@@ -578,6 +580,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           }
 
           if (settled) return;
+
+          // Every settled attempt spent these tokens, including one the user retries.
+          spentOutputTokens += result.outputTokens ?? 0;
+          tokens += result.tokens ?? 0;
+          toolCalls += result.toolCalls ?? 0;
+          if (intent() === "skip") {
+            result = { ...result, ok: false, skipped: true, error: "Skipped by user." };
+          }
 
           // The stop that produced this result was ours, so run the same call
           // again rather than reporting it. The script is still awaiting this
@@ -589,11 +599,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             continue;
           }
 
-          // Counted before the response is sent, so the very call that spent
-          // them already sees them in `budget.spent()`. Failed and skipped
-          // agents count too — they burned the tokens either way.
-          spentOutputTokens += result.outputTokens ?? 0;
-
           const finishedAt = Date.now();
           const common = {
             ...base,
@@ -602,8 +607,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             ...attemptMark,
             lastProgressAt: finishedAt,
             durationMs: finishedAt - startedAt,
-            ...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
-            ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
+            ...(tokens > 0 || result.tokens !== undefined ? { tokens } : {}),
+            ...(toolCalls > 0 || result.toolCalls !== undefined ? { toolCalls } : {}),
           };
 
           if (result.ok) {
@@ -638,10 +643,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             {
               ...common,
               state: "error",
-              // A user skip reaches here as a stopped child, which the host
-              // already reports as skipped — the flag is taken from the result
-              // rather than from the intent so an abort mid-skip still reads
-              // as whatever actually happened to the child.
+              // Preserve both host-reported stops and explicit skips accepted during verification.
               error: result.error ?? "Agent failed.",
               ...(result.skipped ? { skipped: true } : {}),
             },
