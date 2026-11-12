@@ -11,7 +11,7 @@ check the entries below for behaviour changes.
 
 ### Fixed
 
-- **Keep the full workflow result when the notification truncates it.** A return value longer than the 4,000-character notification preview is now also written beside the workflow journal, and the notification names that file. The journal holds each `agent()` answer, not the script's return value, so the tail was otherwise unreachable without re-running the workflow.
+- **Reliability fixes from #11, part 1:** durable sessions now honor the resolved built-in tool list, so Explore, Plan, and `disallowedTools` agents cannot call `write` or `edit`. Workflow resume, retry, and skip spend is counted once, an over-long workflow result is saved beside the journal, and worktrees keep unpreserved files while result reads wait for cleanup. Agent-file model pins resolve like caller-supplied pins, and the schedule store reloads persisted jobs before mutating. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
 
 ## [2026.11.091] - 2026-11-09
 
