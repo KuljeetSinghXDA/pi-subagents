@@ -9,6 +9,10 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Additional reliability fixes:** Count workflow resumes once and retain usage across retries, skips, and verification launch failures. Preserve finalized tool-result overrides and tool usage. Keep worktrees recoverable when Git preservation fails, and reload persisted schedules before mutations. Drop questions from failed initial runs, preserve superseded questions after delivery failures, and include nested resume spend in ancestor totals. Resolve bare or cosmetically different agent-file model pins instead of silently inheriting the parent model. Apply tool-result redaction and usage hooks to thrown execution errors as well as successful results. Preserve new files even when Git hides untracked files, and wait for worktree recovery notes before serving final results.
+
 ## [2026.11.091] - 2026-11-09
 
 > **⚠️ Breaking: the minimum supported pi version is now 1.5.0.** The extension uses the 1.5 session, model-registry, tool and prompt APIs; the previous 1.1.0 peer floor passed some surface type checks but failed the runtime integration suite. Upgrade pi before installing this release.
