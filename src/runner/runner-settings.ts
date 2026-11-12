@@ -4,6 +4,7 @@
 
 import type { Model } from "@earendil-works/pi-ai";
 import { getAgentConfig } from "../agent-types.js";
+import { resolveModel } from "../model-resolver.js";
 
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
@@ -70,6 +71,14 @@ export function resolveDefaultModel(
 
       const found = registry.find(provider, modelId);
       if (found && isAvailable(provider, modelId)) return found;
+    }
+    const available = registry.getAvailable?.();
+    if (available) {
+      const resolved = resolveModel(configModel, {
+        find: registry.find.bind(registry),
+        getAll: () => available,
+      });
+      if (typeof resolved !== "string") return resolved;
     }
   }
 

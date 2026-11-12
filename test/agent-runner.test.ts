@@ -3484,7 +3484,7 @@ describe("agent-runner abort signal forwarding", () => {
 // purely for test/agent-runner-settings.test.ts).
 describe("resolveDefaultModel", () => {
   const parent = { provider: "anthropic", id: "parent-model" } as any;
-  const haiku = { provider: "anthropic", id: "claude-haiku-4-5" } as any;
+  const haiku = { provider: "anthropic", id: "claude-haiku-4-5", name: "Claude Haiku 4.5" } as any;
 
   /** Registry whose `find` always succeeds; `getAvailable` is what varies. */
   function registry(available?: any[]) {
@@ -3520,10 +3520,9 @@ describe("resolveDefaultModel", () => {
     expect(resolveDefaultModel(parent, r as any, "anthropic/nope")).toBe(parent);
   });
 
-  it("falls back to the parent for a model string with no provider prefix", () => {
+  it.each(["haiku", "claude-haiku-4.5", "missing/claude-haiku-4-5-20251001"])("resolves a tolerant model pin %s", pin => {
     const r = registry([haiku]);
-    expect(resolveDefaultModel(parent, r, "haiku")).toBe(parent);
-    expect(r.find).not.toHaveBeenCalled();
+    expect(resolveDefaultModel(parent, r, pin)).toEqual({ provider: "anthropic", id: "claude-haiku-4-5" });
   });
 
   it("returns the parent model when no model is configured", () => {

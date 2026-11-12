@@ -7,11 +7,8 @@
  * Scenarios:
  *   1. .md pins "faux/pinned-model" (available) + settings default differs
  *      → the pin must win.                (expected GREEN — parse + resolve)
- *   2. .md names a model WITHOUT the provider prefix → currently resolveDefaultModel
- *      requires "provider/id" exactly, so the Agent tool's fuzzy resolution
- *      and the runner's disagree; the pin silently degrades to the parent
- *      (plus a model-error warning). Expected: same model the Agent tool
- *      would resolve.                     (expected RED — the gap)
+ *   2. .md names a model WITHOUT the provider prefix → the runner resolves it
+ *      tolerantly, matching the Agent tool instead of silently using the parent.
  *   3. .md without model + settings default → settings wins. (covered in
  *      agent-runner-settings-model.e2e.test.ts, kept green here as control)
  */
@@ -106,17 +103,8 @@ describe("agent .md `model:` frontmatter is respected (real file path)", () => {
     expect(m?.id).toBe("pinned-model");
   });
 
-  // OPEN GAP — kept as an expected-fail repro. The Agent tool's resolveModel
-  // fuzzy-matches a bare model id against the available models; the runner's
-  // resolveDefaultModel demands "provider/id" verbatim, so a provider-less
-  // pin degrades to the parent model. The README's frontmatter docs promise
-  // tolerant pin matching, so this is a bug to fix — when it goes green,
-  // promote it back to it().
-  it.fails("REPRO: a provider-less pin in the .md resolves like the Agent tool would", async () => {
-    // The Agent tool's resolveModel fuzzy-matches a bare model id against the
-    // available models; the runner's resolveDefaultModel demands
-    // "provider/id" verbatim. One of the two must be wrong — today the .md's
-    // bare id degrades to the parent model.
+  it("a provider-less pin in the .md resolves like the Agent tool would", async () => {
+    // File-based pins must use the same tolerant matching as caller-supplied models.
     writeAgentMd("bare", "model: pinned-model");
     const m = await sessionModelFor("bare");
     expect(m?.id).toBe("pinned-model");
