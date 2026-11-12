@@ -1544,12 +1544,12 @@ describe("AgentManager — steer()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
-  it("returns false for an unknown id", () => {
+  it("returns false for an unknown id", async () => {
     manager = new AgentManager();
-    expect(manager.steer("nope", "hi")).toBe(false);
+    await expect(manager.steer("nope", "hi")).resolves.toBe(false);
   });
 
-  it("delivers to a live session via session.steer()", () => {
+  it("delivers to a live session via session.steer()", async () => {
     manager = new AgentManager();
     const steer = vi.fn(() => Promise.resolve());
     let captured: ((s: any) => void) | undefined;
@@ -1561,19 +1561,56 @@ describe("AgentManager — steer()", () => {
     // Simulate the session becoming ready.
     captured?.({ steer, dispose: vi.fn() });
 
-    expect(manager.steer(id, "go left")).toBe(true);
+    await expect(manager.steer(id, "go left")).resolves.toBe(true);
     expect(steer).toHaveBeenCalledWith("go left");
   });
 
-  it("queues onto pendingSteers when the session isn't ready yet", () => {
+  it("waits for session acceptance before announcing a steer", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    let accept!: () => void;
+    manager.getRecord(id)!.session = {
+      steer: vi.fn(() => new Promise<void>(resolve => { accept = resolve; })),
+      dispose: vi.fn(),
+    } as any;
+
+    const acceptance = manager.steer(id, "go left");
+    expect(onSteered).not.toHaveBeenCalled();
+    accept();
+    await expect(acceptance).resolves.toBe(true);
+    expect(onSteered).toHaveBeenCalledExactlyOnceWith(manager.getRecord(id), "go left");
+  });
+
+  it("rejects failed session acceptance without announcing a steer", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    let reject!: (error: Error) => void;
+    manager.getRecord(id)!.session = {
+      steer: vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; })),
+      dispose: vi.fn(),
+    } as any;
+
+    const acceptance = manager.steer(id, "go left");
+    const outcome = Promise.resolve(acceptance).catch(error => error);
+    reject(new Error("session closed"));
+    expect(await outcome).toEqual(new Error("session closed"));
+    expect(onSteered).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)!.status).toBe("running");
+  });
+
+  it("queues onto pendingSteers when the session isn't ready yet", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     const record = manager.getRecord(id)!;
     record.session = undefined; // not ready
 
-    expect(manager.steer(id, "first")).toBe(true);
-    expect(manager.steer(id, "second")).toBe(true);
+    await expect(manager.steer(id, "first")).resolves.toBe(true);
+    await expect(manager.steer(id, "second")).resolves.toBe(true);
     expect(record.pendingSteers).toEqual(["first", "second"]);
   });
 
@@ -1583,7 +1620,7 @@ describe("AgentManager — steer()", () => {
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
     await manager.getRecord(id)?.promise;
     expect(manager.getRecord(id)?.status).toBe("completed");
-    expect(manager.steer(id, "too late")).toBe(false);
+    await expect(manager.steer(id, "too late")).resolves.toBe(false);
   });
 });
 
@@ -2124,18 +2161,18 @@ describe("AgentManager — pendingSteers flush", () => {
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
     const record = manager.getRecord(id)!;
 
-    expect(manager.steer(id, "before session")).toBe(true);
+    await expect(manager.steer(id, "before session")).resolves.toBe(true);
     expect(onSteered).toHaveBeenLastCalledWith(record, "before session");
 
     createSession!();
-    expect(manager.steer(id, "live")).toBe(true);
+    await expect(manager.steer(id, "live")).resolves.toBe(true);
     expect(steer).toHaveBeenLastCalledWith("live");
     expect(onSteered).toHaveBeenLastCalledWith(record, "live");
     expect(onSteered).toHaveBeenCalledTimes(2);
 
     finish!();
     await record.promise;
-    expect(manager.steer(id, "too late")).toBe(false);
+    await expect(manager.steer(id, "too late")).resolves.toBe(false);
     expect(onSteered).toHaveBeenCalledTimes(2);
   });
 

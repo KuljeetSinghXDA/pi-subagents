@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, ToolResultMessage } from "@earendil-works/pi-ai";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Harness, type HarnessSettings, MemoryStorage } from "@earendil-works/pi-durable";
@@ -91,6 +91,52 @@ describe("runner reliability with real durable and Pi", () => {
     expect(session.pendingMessageCount).toBe(0);
     expect(session.messages.filter((m: any) => m.role === "user")).toHaveLength(2);
     expect(session.messages.some((m: any) => m.role === "system")).toBe(false);
+  });
+  it("publishes committed steering and tool history before the final answer settles", async () => {
+    const toolStarted = deferred(); const releaseTool = deferred();
+    const finalStarted = deferred(); const finishFinal = deferred();
+    const steering = "live steering checkpoint";
+    let session!: AgentSession;
+    let providerMessages: Message[] = [];
+    const deltas: number[] = [];
+    const running = start(async (index, context) => {
+      if (index === 0) return answer("reading", [{ type: "toolCall", id: "live-read", name: "read", arguments: { path: "missing" } }]);
+      providerMessages = context.messages;
+      finalStarted.resolve();
+      await finishFinal.promise;
+      return answer("final answer");
+    }, { onSessionCreated: (value: AgentSession) => {
+      session = value;
+      session.agent.beforeToolCall = async () => { toolStarted.resolve(); await releaseTool.promise; };
+    }, onAssistantUsage: (value: { output: number }) => deltas.push(value.output) });
+    try {
+      await toolStarted.promise;
+      await session.steer(steering);
+      releaseTool.resolve();
+      await finalStarted.promise;
+      expect(providerMessages.some(message => message.role === "user" && JSON.stringify(message.content).includes(steering))).toBe(true);
+      await vi.waitFor(() => expect(session.messages.filter(message => message.role === "user" && JSON.stringify(message.content).includes(steering))).toHaveLength(1));
+      expect(session.isStreaming).toBe(true);
+      expect(session.messages.map(message => message.role)).toEqual(providerMessages.filter(message => message.role !== "system").map(message => message.role));
+      expect(deltas).toEqual([3]);
+      expect(session.pendingMessageCount).toBe(0);
+    } finally {
+      releaseTool.resolve();
+      finishFinal.resolve();
+      await running;
+    }
+    const result = await running;
+    expect(result.responseText).toBe("final answer");
+    expect(result.session.messages.filter(message => message.role === "user" && JSON.stringify(message.content).includes(steering))).toHaveLength(1);
+    expect(result.session.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult", "user", "assistant"]);
+    expect(deltas).toEqual([3, 3]);
+    expect(result.session.pendingMessageCount).toBe(0);
+    expect(result.session.getSessionStats()).toMatchObject({ tokens: { total: 40 }, cost: 2 });
+    const completed = result.session.messages.slice();
+    const resumed = await resumeAgent(result.session, { type: "runner-test" });
+    expect(resumed.text).toBe("final answer");
+    expect(result.session.messages).toEqual(completed);
+    expect(result.session.getSessionStats()).toMatchObject({ tokens: { total: 40 }, cost: 2 });
   });
   it.each([
     ["stop", false], ["error", false], ["aborted", false], ["error", true], ["aborted", true],

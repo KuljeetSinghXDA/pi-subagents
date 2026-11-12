@@ -534,12 +534,12 @@ export class AgentManager {
     return resumeRecord(this.resumeDeps(), id, prompt, signal, options);
   }
 
-  steer(id: string, message: string): boolean {
+  async steer(id: string, message: string): Promise<boolean> {
     const record = this.registry.agents.get(id);
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {
-      record.session.steer(message).catch(err => console.error("[pi-subagents-hub] steer failed:", err));
+      await record.session.steer(message);
     } else {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);

@@ -1276,6 +1276,8 @@ async function executeDurableAgentPrompt(
       }
       cursor = page.next;
     } while (cursor);
+    // Publish committed history without replaying events or replacing streamingMessage.
+    session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
   }
 
   // Keep Pi's public input processing (including transformed inputs and images).
@@ -1404,7 +1406,6 @@ async function executeDurableAgentPrompt(
       }
 
       await drainCommitted();
-      session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
       const settlements = await Promise.all(submissions.map((item) => item.wait(baseContext)));
       const settled = [...settlements].reverse().find((item) => item.status === "unanswered");
       if (settled?.status === "unanswered" && !run.aborted && !options.signal?.aborted) {
@@ -1467,7 +1468,6 @@ async function executeDurableAgentPrompt(
         try {
           // Retry only messages whose append failed, with an independent context.
           await drainCommitted();
-          session.messages.splice(startIndex, session.messages.length - startIndex, ...committedMessages);
         } finally {
           run.unsubscribe();
           collector.unsubscribe();

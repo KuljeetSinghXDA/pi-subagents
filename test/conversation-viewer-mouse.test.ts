@@ -18,7 +18,7 @@ function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScroll
   const record = { type: "Explore", description: "Observe only", status: "running", toolUses: 0, startedAt: Date.now() } as AgentRecord;
   const done = vi.fn();
   const stop = vi.fn();
-  const steer = vi.fn();
+  const steer = vi.fn().mockResolvedValue(true);
   const viewer = new ConversationViewer(tui, session, record, undefined, {
     fg: (_color: string, text: string) => text,
     bold: (text: string) => text,
@@ -44,7 +44,7 @@ function firstRow(lines: string[]): string | undefined {
 }
 
 describe("regular conversation viewer", () => {
-  it("retains its floating frame, height cap, and keyboard-only navigation", () => {
+  it("retains its floating frame, height cap, and keyboard-only navigation", async () => {
     const { viewer, render, terminal, mouse, steer } = setup(30, 90, undefined, "always", "regular");
     try {
       const before = render();
@@ -66,6 +66,7 @@ describe("regular conversation viewer", () => {
       expect(render()).toHaveLength(21);
       viewer.handleInput("\r");
       expect(steer).toHaveBeenCalledExactlyOnceWith("draft");
+      await vi.waitFor(() => expect(viewer.composing).toBe(false));
       terminal.rows = 40;
       expect(render()).toHaveLength(28);
       expect(viewer.render(5)).toEqual([]);
@@ -281,7 +282,7 @@ describe("fullscreen conversation observer", () => {
     expect(render().join("\n")).toContain("row-000");
   });
 
-  it("clicks steer, sends only to the child, and closes without stopping it", () => {
+  it("clicks steer, sends only to the child, and closes without stopping it", async () => {
     const { click, mouse, viewer, render, steer, stop, done, unsubscribe } = setup();
     click("Enter steer");
     viewer.handleInput("hello child");
@@ -290,6 +291,7 @@ describe("fullscreen conversation observer", () => {
     viewer.handleInput("!");
     click("Enter send");
     expect(steer).toHaveBeenCalledExactlyOnceWith("!hello child");
+    await vi.waitFor(() => expect(viewer.composing).toBe(false));
     click("Esc close");
     expect(done).toHaveBeenCalledExactlyOnceWith(undefined);
     expect(stop).not.toHaveBeenCalled();
@@ -323,7 +325,7 @@ describe("fullscreen conversation observer", () => {
 });
 
 describe("observer input isolation in Pi's fullscreen renderer", () => {
-  it("keeps real wheel, drag, click, and keyboard input off the main view, then restores focus", () => {
+  it("keeps real wheel, drag, click, and keyboard input off the main view, then restores focus", async () => {
     let input: (data: string) => void = () => {};
     const terminal: Terminal = {
       rows: 20, columns: 100, kittyProtocolActive: false,
@@ -384,6 +386,7 @@ describe("observer input isolation in Pi's fullscreen renderer", () => {
       input("child instruction");
       input("\r");
       expect(steer).toHaveBeenCalledExactlyOnceWith("child instruction");
+      await vi.waitFor(() => expect(viewer.composing).toBe(false));
       expect(main.scrollTop).toBe(position);
       expect(editor.getValue()).toBe("main draft");
       expect(editor.onSubmit).not.toHaveBeenCalled();

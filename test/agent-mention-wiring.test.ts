@@ -121,6 +121,26 @@ const send = (lifecycle: Map<string, any>, text: string, source = "interactive")
   lifecycle.get("input")({ type: "input", text, source }, ctx());
 
 describe("messaging a running agent", () => {
+  it("waits for steering acceptance and shows a rejected send without claiming success", async () => {
+    const { tools, lifecycle } = boot();
+    let reject!: (error: Error) => void;
+    heldRun(fakeSession({
+      steer: vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; })),
+    }));
+    await spawnBackground(tools);
+    await flush();
+    const uiCtx = ctx();
+    const result = lifecycle.get("input")(
+      { type: "input", text: "@explore try now", source: "interactive" },
+      uiCtx,
+    );
+
+    expect(uiCtx.ui.notify).not.toHaveBeenCalled();
+    reject(new Error("session closed"));
+    await expect(result).resolves.toEqual({ action: "handled" });
+    expect(uiCtx.ui.notify).toHaveBeenCalledExactlyOnceWith("Failed to send to @explore: session closed", "error");
+  });
+
   it("steers it, announces it, and spends no main-model turn", async () => {
     const { pi, tools, lifecycle } = boot();
     const session = fakeSession();
