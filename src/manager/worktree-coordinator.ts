@@ -66,6 +66,9 @@ export class WorktreeCoordinator {
       record.result =
         (record.result ?? "") +
         `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${options.customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+    } else if (wtResult.hasChanges && wtResult.path) {
+      record.result = (record.result ?? "") +
+        `\n\n---\nAutomatic preservation failed. Worktree retained at \`${wtResult.path}\` for manual recovery. Do not remove it until your changes are saved.`;
     }
     return wtResult;
   }

@@ -1019,10 +1019,11 @@ Set `isolation: worktree` to run an agent in a temporary git worktree:
 Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 ```
 
-The agent gets a full, isolated copy of the repository. The worktree directory is removed on completion either way — what differs is whether a branch is left behind:
+The agent gets a full, isolated copy of the repository. Successful cleanup removes the worktree directory. Result reads wait for cleanup to finish so branch notes and recovery warnings are complete. Failed preservation keeps it for manual recovery:
 - **No changes:** worktree is cleaned up automatically, no branch
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`), and the result names the branch and the `git merge` command for it. The branch is the only artifact — the worktree path is gone, so nothing points into it
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
+- **Preservation fails:** the worktree remains on disk instead of deleting files or detached commits. The result names the recovery path. Recover the files manually before removing that directory.
 
 A resumed agent never gets a worktree, as in Claude Code: a fresh copy of HEAD would not hold its earlier edits. This covers `Agent({ resume })` and `@handle` once the record is evicted, and a workflow's `resume`. If its worktree held changes, the resume is refused with "its worktree no longer exists"; the work is on its branch. If the worktree held none, the agent continues in the main checkout without isolation.
 

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -240,6 +240,28 @@ describe("worktree", () => {
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
+    it("preserves new files when Git configuration hides untracked files", async () => {
+      execFileSync("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir, stdio: "pipe" });
+      const wt = (await createWorktree(pi, repoDir, "hidden-untracked"))!;
+      try {
+        writeFileSync(join(wt.path, "agent-output.txt"), "irreplaceable output");
+        expect(execFileSync("git", ["status", "--porcelain"], {
+          cwd: wt.path, encoding: "utf-8", stdio: "pipe",
+        })).toBe("");
+
+        const result = await cleanupWorktree(pi, repoDir, wt, "new file");
+
+        expect(result.hasChanges).toBe(true);
+        expect(result.branch).toBe("pi-agent-hidden-untracked");
+        expect(execFileSync("git", ["show", `${result.branch}:agent-output.txt`], {
+          cwd: repoDir, encoding: "utf-8", stdio: "pipe",
+        })).toBe("irreplaceable output");
+        expect(existsSync(wt.path)).toBe(false);
+      } finally {
+        rmSync(wt.path, { recursive: true, force: true });
+      }
+    });
+
     it("commits changes even when a pre-commit hook rejects (--no-verify)", async () => {
       // A failing pre-commit hook in the main repo also applies to its
       // worktrees — without --no-verify it would abort the preservation commit.
@@ -373,11 +395,9 @@ describe("worktree", () => {
   });
 });
 
-// cleanupWorktree's outer catch is the only place in the repo where a caught
-// error can DESTROY user work while reporting success-shaped output: it removes
-// the worktree and returns `{ hasChanges: false }`, which the manager renders as
-// "the agent changed nothing". If the commit or branch step fails, the agent's
-// commits go with the worktree and nobody is told.
+// Cleanup failures must keep the worktree recoverable rather than deleting
+// files or detached commits that have not reached a preservation branch.
+// The result must name that retained path instead of claiming no changes.
 describe("cleanupWorktree — failure path", () => {
   let repoDir: string;
   let pi: ExtensionAPI;
@@ -402,12 +422,9 @@ describe("cleanupWorktree — failure path", () => {
     expect(result.branch).toBeUndefined();
   });
 
-  it("swallows a git failure inside a still-present worktree and reports no changes", async () => {
-    // The outer catch. The directory exists — so the existsSync guard above
-    // does not fire — but git cannot operate in it, which is what a corrupted
-    // or externally-detached worktree looks like. The agent's work is lost
-    // either way; what matters is that cleanup does not reject out of the
-    // manager's settle path and take the whole record down with it.
+  it("keeps a corrupted worktree and reports its recovery path", async () => {
+    // A broken .git file prevents preservation, but the output still exists
+    // and must remain available for manual recovery.
     const baseDir = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-"));
     try {
       const wt = (await createWorktree(pi, repoDir, "corrupt", baseDir))!;
@@ -417,8 +434,8 @@ describe("cleanupWorktree — failure path", () => {
 
       const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
 
-      expect(result.hasChanges).toBe(false);
-      expect(result.branch).toBeUndefined();
+      expect(result).toEqual({ hasChanges: true, path: wt.path });
+      expect(readFileSync(join(wt.path, "work.txt"), "utf-8")).toBe("agent output");
       // The corruption defeats cleanup on purpose, so the directory is still
       // there — the reason this test disposes of it itself. Created under its
       // own base dir, that leaves nothing behind in the system temp dir.
@@ -428,21 +445,27 @@ describe("cleanupWorktree — failure path", () => {
     }
   });
 
-  it("reports no changes when the preservation commit fails", async () => {
-    // `git commit` failing resolves with a non-zero code rather than throwing,
-    // so the outer catch is only reached if the result is inspected.
-    const wt = (await createWorktree(pi, repoDir, "commit-fails"))!;
-    writeFileSync(join(wt.path, "work.txt"), "agent output");
+  it.each(["status", "add", "commit", "branch"])("preserves files when git %s fails", async command => {
+    const baseDir = mkdtempSync(join(tmpdir(), "pi-wt-preserve-"));
+    try {
+      const wt = (await createWorktree(pi, repoDir, `${command}-fails`, baseDir))!;
+      writeFileSync(join(wt.path, "work.txt"), "agent output");
+      const failing = failingPi(args => args[0] === command, { code: 1, killed: false });
 
-    const result = await cleanupWorktree(
-      failingPi(args => args[0] === "commit", { code: 1, killed: false }),
-      repoDir,
-      wt,
-      "commit fails",
-    );
+      const result = await cleanupWorktree(failing, repoDir, wt, `${command} fails`);
 
-    expect(result.hasChanges).toBe(false);
-    expect(result.branch).toBeUndefined();
+      // Check the actual artifact first: the old catch forcibly removed it.
+      expect(existsSync(wt.path)).toBe(true);
+      expect(readFileSync(join(wt.path, "work.txt"), "utf-8")).toBe("agent output");
+      expect(result).toEqual({ hasChanges: true, path: wt.path });
+      expect(vi.mocked(failing.exec).mock.calls.some(([, args]) =>
+        args[0] === "worktree" && args[1] === "remove")).toBe(false);
+      expect(execFileSync("git", ["worktree", "list", "--porcelain"], {
+        cwd: repoDir, encoding: "utf-8", stdio: "pipe",
+      })).toContain(wt.path);
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 
   it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", async () => {
