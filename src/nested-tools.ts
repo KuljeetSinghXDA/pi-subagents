@@ -7,7 +7,6 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { abortable } from "./abortable.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -17,6 +16,7 @@ import {
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { consumeTerminalResult, waitForRecord } from "./manager/wait-for-record.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
@@ -412,16 +412,15 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      // Wait for completion if requested. Cancellation (e.g. the parent's tool
-      // call is aborted) stops only this wait; the nested child keeps running and
+      // Terminal status may precede cleanup; wait before serving its final output.
+      // Cancellation stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
-        }
-        if (record.promise) await abortable(record.promise, signal);
+      if ((params.wait && (record.status === "running" || record.status === "queued")) ||
+        (record.worktree && record.status !== "running" && record.status !== "queued" && record.status !== "paused")) {
+        await waitForRecord(record, signal);
       }
+      consumeTerminalResult(record);
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },
   });
