@@ -474,6 +474,10 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       }
       const tracker = deps.agentActivity ? createActivityTracker() : undefined;
       if (tracker) deps.agentActivity!.set(id, tracker.state);
+      const previous = manager.getRecord(id);
+      const outputBefore = previous?.lifetimeUsage.output ?? 0;
+      const tokensBefore = getLifetimeTotal(previous?.lifetimeUsage);
+      const toolCallsBefore = previous?.toolUses ?? 0;
       try {
         const record = await (tracker
           ? manager.resume(id, prompt, deps.signal, {
@@ -497,7 +501,12 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         onResolved?.({ recordId: id });
         const info = resolvedInfo(record);
         if (info !== undefined) onResolved?.(info);
-        return toSpawnResult(record);
+        return {
+          ...toSpawnResult(record),
+          outputTokens: Math.max(0, record.lifetimeUsage.output - outputBefore),
+          tokens: Math.max(0, getLifetimeTotal(record.lifetimeUsage) - tokensBefore),
+          toolCalls: Math.max(0, record.toolUses - toolCallsBefore),
+        };
       } finally {
         if (tracker) deps.agentActivity!.delete(id);
       }
