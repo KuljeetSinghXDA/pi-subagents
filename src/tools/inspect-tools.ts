@@ -93,7 +93,11 @@ export function createGetResultTool(deps: InspectToolsDeps) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
+      // A terminal status can precede asynchronous worktree cleanup. Do not
+      // serve or consume that result until its existing run promise settles,
+      // even for a non-waiting read. Paused records must still return promptly.
+      if ((params.wait && (record.status === "running" || record.status === "queued")) ||
+        (record.worktree && record.status !== "running" && record.status !== "queued" && record.status !== "paused")) {
         await waitForRecord(record, signal);
       }
 

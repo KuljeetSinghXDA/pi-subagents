@@ -53,7 +53,7 @@ export function isWorktreeIsolationEnabled(): boolean {
 }
 
 export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
+  /** Whether changes were found, or preservation failed and the worktree was kept for recovery. */
   hasChanges: boolean;
   /** Branch name if changes were committed. */
   branch?: string;
@@ -140,7 +140,7 @@ export async function cleanupWorktree(
 
   try {
     // Check for uncommitted changes in the worktree
-    const status = await git(pi, worktree.path, ["status", "--porcelain"], 10000);
+    const status = await git(pi, worktree.path, ["status", "--porcelain", "--untracked-files=all"], 10000);
 
     if (status) {
       // Changes exist — stage, commit, and create a branch
@@ -181,9 +181,9 @@ export async function cleanupWorktree(
       path: worktree.path,
     };
   } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+    // Preservation did not finish. Removing the worktree here could destroy
+    // uncommitted files or the only reference to the agent's detached HEAD.
+    return { hasChanges: true, path: worktree.path };
   }
 }
 
