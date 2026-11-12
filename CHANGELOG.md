@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keep the full workflow result when the notification truncates it.** A return value longer than the 4,000-character notification preview is now also written beside the workflow journal, and the notification names that file. The journal holds each `agent()` answer, not the script's return value, so the tail was otherwise unreachable without re-running the workflow.
 ## [2026.11.091] - 2026-11-09
 
 > **⚠️ Breaking: the minimum supported pi version is now 1.5.0.** The extension uses the 1.5 session, model-registry, tool and prompt APIs; the previous 1.1.0 peer floor passed some surface type checks but failed the runtime integration suite. Upgrade pi before installing this release.
