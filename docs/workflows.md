@@ -286,6 +286,7 @@ The child runs in the *same* worker and vm context under its own globals, so it 
 |---|---|
 | An inline script, as run | `<tmp>/pi-subagents-<uid>/<encoded-cwd>/<session>/tasks/<run id>.workflow.js` |
 | The resume journal | the same directory, `<run id>.workflow.jsonl` |
+| A result too long for the notification | the same directory, `<run id>.workflow.result.txt`, named in that notification |
 | Saved workflows | `.pi/workflows/` → `.agents/workflows/` → `<agent dir>/workflows/` → installed pi packages, first hit wins |
 
 The first two are scratch: temp storage, wiped by a reboot or a temp sweep. Only the third is durable, and copying a script there is a manual step.
@@ -412,7 +413,7 @@ Concurrency is capped at `max(1, min(16, cpus - 2))`. Queued agents start as slo
 - **No resume at all for `--subagents-workflow-file` runs** — that path never journals.
 - **No UI that lists or launches saved workflows.** The inspector shows this session's runs.
 - **No scheduled workflows.** The scheduler runs agents, not workflows.
-- **Results are not persisted** beyond the journal and the transcript card.
+- **Results are not persisted** beyond the journal, a truncated result's own file, and the transcript card. A result longer than 4,000 characters is written whole beside the journal, and the notification names that file — the notification itself carries only the head.
 - **No driving one from another extension.** A workflow cannot be started or steered over the `pi.events` bus, and its agents are invisible to the RPC surface — the manager-callback lifecycle events are top-level only, so a listener sees no `started`/`completed`/`failed`/`compacted` for them (the workflow inspector's own `p` can still pause and resume one, which does emit `subagents:paused`/`:resumed`) — and `subagents:rpc:stop` refuses them. See [`rpc.md`](rpc.md).
 
 The sandbox is a determinism and accident boundary, not a defence against a deliberately hostile script: the injected globals are host closures, and disabled code generation is what actually stops one being used to compile anything.

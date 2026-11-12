@@ -15,6 +15,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { escapeXml } from "../xml.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
@@ -25,6 +27,15 @@ import type { WorkflowControl, WorkflowRunResult } from "./runtime.js";
 export function workflowRunId(): string {
   return `wf_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
+/**
+ * How much of a run's result the notification carries.
+ *
+ * That notification is the only copy the calling model receives, so a result
+ * past this bound is also written beside the journal — see
+ * {@link completeWorkflowTask}. Without the file the tail of a long return
+ * value would be unreachable to the model that asked for it.
+ */
+export const WORKFLOW_NOTIFICATION_RESULT_CAP = 4000;
 
 export interface WorkflowTask {
   /** Discriminator, alongside Claude Code's `local_agent` / `local_bash`. */
@@ -53,6 +64,13 @@ export interface WorkflowTask {
 
   /** Where this run records its own settled calls, for a later resume. */
   journalPath?: string;
+  /**
+   * The full result, when it outgrew the notification.
+   *
+   * Written beside the journal on completion, and named in the notification so
+   * the caller can read what the tail of its own result was.
+   */
+  resultPath?: string;
   /** A previous run's journal, when this call asked to resume one. */
   replay?: readonly WorkflowJournalEntry[];
   /** The run id this one resumed, for the result line that says so. */
@@ -212,6 +230,26 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.value = result.value;
   task.error = result.error;
   task.endTime = Date.now();
+  persistLongResult(task);
+}
+/**
+ * Keep the whole result when the notification can only carry its head.
+ *
+ * The journal holds each `agent()` call's answer, not the script's own return
+ * value, so it cannot substitute for this: a result the script composed itself
+ * would otherwise be recoverable only by re-running it.
+ */
+function persistLongResult(task: WorkflowTask): void {
+  if (task.journalPath === undefined) return;
+  const text = workflowResultText(task);
+  if (text.length <= WORKFLOW_NOTIFICATION_RESULT_CAP) return;
+  const path = join(dirname(task.journalPath), `${task.id}.workflow.result.txt`);
+  try {
+    writeFileSync(path, text, "utf-8");
+    task.resultPath = path;
+  } catch {
+    // A result file that cannot be written costs a future read, nothing more.
+  }
 }
 
 /**
@@ -292,6 +330,7 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
     : task.status === "killed" ? "Stopped"
     : `Error: ${task.error ?? "unknown"}`;
   const result = workflowResultText(task);
+  const truncated = result.length > WORKFLOW_NOTIFICATION_RESULT_CAP;
   return [
     `<task-notification>`,
     `<task-id>${task.id}</task-id>`,
@@ -301,7 +340,8 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
     `<summary>Workflow "${escapeXml(task.workflowName ?? task.id)}" ${task.status} — ${totals.done}/${totals.total} agents${
       task.replayedCount > 0 ? `, ${task.replayedCount} replayed from ${escapeXml(task.resumedFrom ?? "an earlier run")}` : ""
     }</summary>`,
-    `<result>${escapeXml(result.length > 4000 ? `${result.slice(0, 4000)}\n...(truncated)` : result)}</result>`,
+    `<result>${escapeXml(truncated ? `${result.slice(0, WORKFLOW_NOTIFICATION_RESULT_CAP)}\n...(truncated)` : result)}</result>`,
+    task.resultPath !== undefined ? `<result-file>${escapeXml(task.resultPath)}</result-file>` : null,
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");

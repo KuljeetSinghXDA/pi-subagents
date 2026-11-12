@@ -9,7 +9,10 @@
  * the outside. So it gets driven directly, against a control stub.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowEntry } from "../src/workflow/progress.js";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
@@ -20,6 +23,7 @@ import {
   pauseWorkflowTask,
   resumeWorkflowTask,
   updateWorkflowProgressBatch,
+  WORKFLOW_NOTIFICATION_RESULT_CAP,
   type WorkflowTask,
 } from "../src/workflow/task.js";
 
@@ -158,5 +162,52 @@ describe("formatWorkflowNotification", () => {
     });
 
     expect(formatWorkflowNotification(task, 10_000)).toContain('completed — 3/3 agents');
+  });
+});
+
+describe("a result the notification cannot carry", () => {
+  const long = (marker: string) => `${marker}\n${"x".repeat(WORKFLOW_NOTIFICATION_RESULT_CAP)}${marker}-tail`;
+  function settle(value: unknown, journalPath?: string): WorkflowTask {
+    const task = createWorkflowTask({ id: "wf_capped", script: "", ...(journalPath !== undefined ? { journalPath } : {}) });
+    completeWorkflowTask(task, {
+      status: "completed",
+      value,
+      meta: { name: "probe", description: "d" },
+      progress: [],
+      agentCount: 0,
+      replayedCount: 0,
+    });
+    return task;
+  }
+  let dir: string;
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "wf-result-")); });
+  it("writes the whole value beside the journal and names the file", () => {
+    const journalPath = join(dir, "wf_capped.workflow.jsonl");
+    const task = settle(long("HEAD"), journalPath);
+    const expected = join(dir, "wf_capped.workflow.result.txt");
+    expect(task.resultPath).toBe(expected);
+    expect(readFileSync(expected, "utf-8")).toBe(`HEAD\n${"x".repeat(WORKFLOW_NOTIFICATION_RESULT_CAP)}HEAD-tail`);
+    const notification = formatWorkflowNotification(task, 10_000);
+    expect(notification).toContain("(truncated)");
+    expect(notification).toContain(`<result-file>${expected}</result-file>`);
+    // The head is still inline, so a caller that does not need the tail pays nothing.
+    expect(notification).toContain("HEAD");
+  });
+  it("writes nothing for a result that fits", () => {
+    const task = settle("short", join(dir, "wf_capped.workflow.jsonl"));
+    expect(task.resultPath).toBeUndefined();
+    expect(formatWorkflowNotification(task, 10_000)).not.toContain("<result-file>");
+  });
+  it("still settles when there is nowhere to write the file", () => {
+    const task = settle(long("HEAD"));
+    expect(task.resultPath).toBeUndefined();
+    // Nothing to point at, so the marker alone has to say the tail is missing.
+    expect(formatWorkflowNotification(task, 10_000)).toContain("(truncated)");
+  });
+  it("does not fail the run when the write is impossible", () => {
+    const task = settle(long("HEAD"), join(dir, "missing", "wf_capped.workflow.jsonl"));
+    expect(task.status).toBe("completed");
+    expect(task.resultPath).toBeUndefined();
   });
 });
