@@ -6,7 +6,7 @@ import { findAgentRecordEntry, formatSavedAgentRecord } from "../agent-record-en
 import { getAgentConversation, SUBAGENT_TOOL_NAMES, steerAgent } from "../agent-runner.js";
 import type { CompletionOutbox } from "../completion-outbox.js";
 import { formatLifetimeTokens, markdownText, textResult } from "../entry/renderers.js";
-import { waitForRecord } from "../manager/wait-for-record.js";
+import { consumeTerminalResult, waitForRecord } from "../manager/wait-for-record.js";
 import { formatAnswerSteer, getStatusNote, openQuestionsFooter, partialOutputSuffix } from "../status-note.js";
 import type { AgentRecord, MentionResolution } from "../types.js";
 import { formatCost, formatDuration, getDisplayName } from "../ui/agent-widget.js";
@@ -135,8 +135,8 @@ export function createGetResultTool(deps: InspectToolsDeps) {
       const footer = record.status !== "running" && record.status !== "queued" ? openQuestionsFooter(record) : "";
       if (footer) body = `${body}\n\n${footer}`;
 
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
+      if (record.status !== "running" && record.status !== "queued" && record.status !== "paused") {
+        consumeTerminalResult(record);
         outbox.cancel(record.id);
       }
 

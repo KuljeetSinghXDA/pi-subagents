@@ -14,6 +14,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import type { CompletionOutbox } from "../src/completion-outbox.js";
 import { createGetResultTool } from "../src/tools/inspect-tools.js";
+import type { AgentRecord } from "../src/types.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: "pipe" }).trim();
@@ -144,6 +145,23 @@ describe("result reads during worktree cleanup", () => {
     } finally {
       await f.dispose();
     }
+  });
+
+  it("does not consume or cancel a paused result", async () => {
+    const record = {
+      id: "paused-1", type: "general-purpose", description: "paused", status: "paused",
+      result: "partial", toolUses: 0, startedAt: 0, completedAt: 1, compactionCount: 0,
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, resultConsumed: false,
+    } as unknown as AgentRecord;
+    const cancel = vi.fn();
+    const tool = createGetResultTool({
+      resolveAgentRef: () => record, resolveMention: () => undefined,
+      isShowCostEnabled: () => false, outbox: { cancel } as unknown as CompletionOutbox, pi,
+    });
+    const result = await tool.execute("fetch", { agent_id: record.id }, undefined, undefined, { cwd: tmpdir() } as ExtensionContext);
+    expect(result.content[0].type).toBe("text");
+    expect(record.resultConsumed).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   it("cancels only the result wait while cleanup is pending", async () => {
