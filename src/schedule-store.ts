@@ -72,10 +72,10 @@ export class ScheduleStore {
 
   /** Load from disk into the in-memory cache. Silent on parse errors. */
   private load(): void {
+    this.jobs.clear();
     if (!existsSync(this.filePath)) return;
     try {
       const data: ScheduleStoreData = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      this.jobs.clear();
       for (const j of data.jobs ?? []) this.jobs.set(j.id, j);
     } catch { /* corrupt — start fresh, next save rewrites */ }
   }
@@ -126,9 +126,9 @@ export class ScheduleStore {
   }
 
   update(id: string, patch: Partial<ScheduledSubagent>): ScheduledSubagent | undefined {
-    // No-op fast path — an unknown id changes nothing, so don't lock or touch
-    // disk (which would otherwise lazily create the backing directory).
-    if (!this.jobs.has(id)) return undefined;
+    // Only skip the reload when neither the cache nor disk can hold the job.
+    // Another instance may have added it since this cache was loaded.
+    if (!this.jobs.has(id) && !existsSync(this.filePath)) return undefined;
     return this.withLock(() => {
       const existing = this.jobs.get(id);
       if (!existing) return undefined;
@@ -140,14 +140,21 @@ export class ScheduleStore {
 
   remove(id: string): boolean {
     // No-op fast path — see update().
-    if (!this.jobs.has(id)) return false;
+    if (!this.jobs.has(id) && !existsSync(this.filePath)) return false;
     return this.withLock(() => this.jobs.delete(id));
   }
 
   /** Delete the backing file (used when no jobs remain, optional cleanup). */
   deleteFileIfEmpty(): void {
-    if (this.jobs.size === 0 && existsSync(this.filePath)) {
-      try { unlinkSync(this.filePath); } catch { /* ignore */ }
+    if (!existsSync(this.filePath)) return;
+    acquireLock(this.lockPath);
+    try {
+      this.load();
+      if (this.jobs.size === 0) {
+        try { unlinkSync(this.filePath); } catch { /* ignore */ }
+      }
+    } finally {
+      releaseLock(this.lockPath);
     }
   }
 }
