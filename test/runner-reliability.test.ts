@@ -92,6 +92,38 @@ describe("runner reliability with real durable and Pi", () => {
     expect(session.messages.filter((m: any) => m.role === "user")).toHaveLength(2);
     expect(session.messages.some((m: any) => m.role === "system")).toBe(false);
   });
+  it.each([
+    ["stop", false], ["error", false], ["aborted", false], ["error", true], ["aborted", true],
+  ] as const)("preserves context after %s with billed usage=%s", async (stopReason, billed) => {
+    const firstUsage = { ...structuredClone(usage), input: 50_000, output: 5_000,
+      cacheRead: 20_000, cacheWrite: 5_000, totalTokens: 80_000 };
+    const terminalUsage = billed ? structuredClone(usage) : { input: 0, output: 0,
+      cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { ...usage.cost, total: 0 } };
+    let session: AgentSession;
+    const contextPercents: (number | null)[] = [];
+    const onAssistantUsage = vi.fn<NonNullable<Parameters<typeof runAgent>[3]["onAssistantUsage"]>>(() => {
+      contextPercents.push(getSessionContextPercent(session));
+    });
+    const result = await start(async (index) => {
+      if (index === 0) return { ...answer("", [{ type: "toolCall", id: "context-read", name: "read", arguments: { path: "missing" } }]), usage: firstUsage };
+      return { ...answer(stopReason === "stop" ? "done" : ""), stopReason, usage: terminalUsage,
+        ...(stopReason === "error" ? { errorMessage: "invalid provider request" } : {}) };
+    }, { model: { ...faux.getModel(), contextWindow: 1_000_000 },
+      durableSettings: { retry: { enabled: false }, compaction: { enabled: false } } satisfies HarnessSettings,
+      onSessionCreated: (value: AgentSession) => { session = value; }, onAssistantUsage });
+    expect(onAssistantUsage.mock.calls.map(([value]) => value)).toEqual([firstUsage, terminalUsage].map(value => ({
+      input: value.input, output: value.output, cacheRead: value.cacheRead,
+      cacheWrite: value.cacheWrite, cost: value.cost.total,
+    })));
+    expect(result.session.getSessionStats()).toMatchObject({
+      tokens: { input: firstUsage.input + terminalUsage.input, output: firstUsage.output + terminalUsage.output,
+        cacheRead: firstUsage.cacheRead + terminalUsage.cacheRead, cacheWrite: firstUsage.cacheWrite + terminalUsage.cacheWrite,
+        total: firstUsage.totalTokens + terminalUsage.totalTokens },
+      cost: firstUsage.cost.total + terminalUsage.cost.total,
+    });
+    expect(contextPercents).toEqual([8, 8]);
+    expect(getSessionContextPercent(result.session)).toBe(8);
+  });
   it("hard-aborts durable before hard-boundary tool execution with exact grace", async () => {
     const activity: any[] = []; const contexts: any[] = [];
     const result = await start(async (index, context) => {

@@ -923,7 +923,13 @@ async function executeDurableAgentPrompt(
     accountedMessages.add(message);
     const usage = message.usage;
     if (!usage) return;
-    setDurableContextUsage(session, usage, toolLoadout.model?.contextWindow ?? ctx.model?.contextWindow ?? 0);
+    if (
+      message.stopReason !== "error" &&
+      message.stopReason !== "aborted" &&
+      (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0
+    ) {
+      setDurableContextUsage(session, usage, toolLoadout.model?.contextWindow ?? ctx.model?.contextWindow ?? 0);
+    }
     options.onAssistantUsage?.({
       input: usage.input ?? 0,
       output: usage.output ?? 0,
