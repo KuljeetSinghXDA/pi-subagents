@@ -164,6 +164,58 @@ describe("ScheduleStore", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
+  it("does not resurrect jobs after another instance removes the backing file", () => {
+    const file = join(tmp, "s.json");
+    const first = new ScheduleStore(file);
+    const removed = makeJob({ id: "removed" });
+    first.add(removed);
+    const stale = new ScheduleStore(file);
+    first.remove(removed.id);
+    first.deleteFileIfEmpty();
+    expect(existsSync(file)).toBe(false);
+
+    const added = makeJob({ id: "added" });
+    stale.add(added);
+
+    expect(new ScheduleStore(file).list()).toEqual([added]);
+    expect(stale.list()).toEqual([added]);
+  });
+
+  it("does not delete another instance's newly persisted jobs with an empty cache", () => {
+    const file = join(tmp, "s.json");
+    const stale = new ScheduleStore(file);
+    const writer = new ScheduleStore(file);
+    const job = makeJob();
+    writer.add(job);
+
+    stale.deleteFileIfEmpty();
+
+    expect(existsSync(file)).toBe(true);
+    expect(new ScheduleStore(file).list()).toEqual([job]);
+  });
+
+  it("updates a job another instance added after this instance loaded", () => {
+    const file = join(tmp, "s.json");
+    const stale = new ScheduleStore(file);
+    const writer = new ScheduleStore(file);
+    const job = makeJob();
+    writer.add(job);
+
+    expect(stale.update(job.id, { enabled: false })).toMatchObject({ id: job.id, enabled: false });
+    expect(new ScheduleStore(file).get(job.id)?.enabled).toBe(false);
+  });
+
+  it("removes a job another instance added after this instance loaded", () => {
+    const file = join(tmp, "s.json");
+    const stale = new ScheduleStore(file);
+    const writer = new ScheduleStore(file);
+    const job = makeJob();
+    writer.add(job);
+
+    expect(stale.remove(job.id)).toBe(true);
+    expect(new ScheduleStore(file).list()).toEqual([]);
+  });
+
   it("deleteFileIfEmpty unlinks file only when no jobs remain", () => {
     const file = join(tmp, "s.json");
     const store = new ScheduleStore(file);
