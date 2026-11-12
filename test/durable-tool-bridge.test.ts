@@ -48,6 +48,40 @@ describe("bridgePiToolToDurableTool", () => {
     expect(activities[1].toolName).toBe("mcp__calculator__add");
   });
 
+  it.each([false, true])("preserves tool usage with hook override=%s in durable results and emitted messages", async (override) => {
+    const usage = { input: 10, output: 3, cacheRead: 2, cacheWrite: 5, totalTokens: 20,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 } };
+    const finalUsage = override ? { ...usage, output: 8, totalTokens: 25 } : usage;
+    const messages: unknown[] = [];
+    const durableTool = bridgePiToolToDurableTool({
+      name: "paid-tool", parameters: {},
+      execute: async () => ({ content: [{ type: "text", text: "done" }], details: {}, usage }),
+    }, {
+      afterToolCall: async (context) => {
+        expect(context.result.usage).toEqual(usage);
+        return override ? { usage: finalUsage } : undefined;
+      },
+      onToolResult: (message) => messages.push(message),
+    });
+    const result = await durableTool.execute({}, { output: vi.fn(), callId: "paid-call" } as Parameters<typeof durableTool.execute>[1], BACKGROUND_CONTEXT);
+    expect(result.usage).toEqual(finalUsage);
+    expect(messages).toEqual([expect.objectContaining({ usage: finalUsage })]);
+  });
+
+  it("applies finalized result overrides to durable results and emitted messages", async () => {
+    const messages: unknown[] = [];
+    const durableTool = bridgePiToolToDurableTool({
+      name: "filtered-tool", parameters: {},
+      execute: async () => ({ content: [{ type: "text", text: "original" }], details: { original: true } }),
+    }, {
+      afterToolCall: async () => ({ content: [{ type: "text", text: "filtered" }], details: { filtered: true }, isError: true }),
+      onToolResult: (message) => messages.push(message),
+    });
+    const result = await durableTool.execute({}, { output: vi.fn(), callId: "filtered-call" } as Parameters<typeof durableTool.execute>[1], BACKGROUND_CONTEXT);
+    expect(result).toMatchObject({ output: [{ type: "text", text: "filtered" }], details: { filtered: true }, isError: true });
+    expect(messages).toEqual([expect.objectContaining({ content: result.output, details: result.details, isError: true })]);
+  });
+
   it("marks read-only inspection tools as replay-safe", () => {
     const readTool: ExecutablePiTool = {
       name: "read",
@@ -89,6 +123,64 @@ describe("bridgePiToolToDurableTool", () => {
     const result = await durableTool.execute({}, mockApi, BACKGROUND_CONTEXT);
     expect(result.isError).toBe(true);
     expect(result.output).toEqual([{ type: "text", text: "Network timeout contacting MCP service" }]);
+  });
+
+  it.each([undefined, false])("finalizes thrown errors once with redaction and usage (isError override=%s)", async (isError) => {
+    const content = [{ type: "text" as const, text: "Service unavailable [redacted]" }];
+    const usage = { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 10,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.25 } };
+    const messages: unknown[] = [];
+    const onActivity = vi.fn();
+    const afterToolCall = vi.fn(async () => ({ content, details: { redacted: true }, usage, isError }));
+    const durableTool = bridgePiToolToDurableTool({
+      name: "paid-service", parameters: {},
+      execute: async () => { throw new Error("Service failed with token=SECRET-123"); },
+    }, { afterToolCall, onActivity, onToolResult: (message) => messages.push(message) });
+    const result = await durableTool.execute({}, { output: vi.fn(), callId: "error-call" } as Parameters<typeof durableTool.execute>[1], BACKGROUND_CONTEXT);
+
+    expect(afterToolCall).toHaveBeenCalledTimes(1);
+    expect(afterToolCall).toHaveBeenCalledWith({
+      toolCall: { type: "toolCall", id: "error-call", name: "paid-service", arguments: {} },
+      args: {},
+      result: { content: [{ type: "text", text: "Service failed with token=SECRET-123" }], details: {}, usage: undefined },
+      isError: true,
+    }, undefined);
+    expect(result).toEqual({ output: content, details: { redacted: true }, usage, isError: isError ?? true });
+    expect(messages).toEqual([{
+      role: "toolResult", toolName: "paid-service", toolCallId: "error-call", content,
+      details: { redacted: true }, usage, isError: isError ?? true, timestamp: expect.any(Number),
+    }]);
+    expect(onActivity.mock.calls).toEqual([
+      [{ type: "start", toolName: "paid-service", toolCallId: "error-call", args: {} }],
+      [{ type: "end", toolName: "paid-service", toolCallId: "error-call" }],
+    ]);
+  });
+
+  it.each([false, true])("handles a throwing finalization hook once after execution throws=%s", async (throws) => {
+    const usage = { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 10,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.25 } };
+    const messages: unknown[] = [];
+    const onActivity = vi.fn();
+    const afterToolCall = vi.fn(async () => { throw "Hook failed"; });
+    const durableTool = bridgePiToolToDurableTool({
+      name: "paid-service", parameters: {},
+      execute: async () => {
+        if (throws) throw new Error("Service failed");
+        return { content: [{ type: "text", text: "done" }], details: { original: true }, usage };
+      },
+    }, { afterToolCall, onActivity, onToolResult: (message) => messages.push(message) });
+    const result = await durableTool.execute({}, { output: vi.fn(), callId: "hook-error" } as Parameters<typeof durableTool.execute>[1], BACKGROUND_CONTEXT);
+
+    expect(afterToolCall).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ output: [{ type: "text", text: "Hook failed" }], details: {}, isError: true, usage: undefined });
+    expect(messages).toEqual([{
+      role: "toolResult", toolName: "paid-service", toolCallId: "hook-error", content: result.output,
+      details: {}, isError: true, usage: undefined, timestamp: expect.any(Number),
+    }]);
+    expect(onActivity.mock.calls).toEqual([
+      [{ type: "start", toolName: "paid-service", toolCallId: "hook-error", args: {} }],
+      [{ type: "end", toolName: "paid-service", toolCallId: "hook-error" }],
+    ]);
   });
 
   it("passes both toolCall and args to beforeToolCall", async () => {

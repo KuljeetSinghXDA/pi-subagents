@@ -686,7 +686,15 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
 
         let toolResult: any;
         try {
-          const res = await origExecute(input, wrappedApi, context);
+          let res: Awaited<ReturnType<typeof origExecute>>;
+          try {
+            res = await origExecute(input, wrappedApi, context);
+          } catch (error) {
+            res = {
+              output: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+              isError: true,
+            };
+          }
           let content: any[] = [];
           if (Array.isArray((res as any)?.output)) {
             content = (res as any).output;
@@ -711,6 +719,7 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
             content,
             details,
             isError,
+            usage: res?.usage,
             timestamp: Date.now(),
           };
           if ((session as any).agent?.afterToolCall) {
@@ -723,14 +732,15 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
               },
               options.signal,
             );
-            if (hookOverride?.content) {
-              toolResult.content = hookOverride.content;
-            }
+            toolResult.content = hookOverride?.content ?? toolResult.content;
+            toolResult.details = hookOverride?.details ?? toolResult.details;
+            toolResult.isError = hookOverride?.isError ?? toolResult.isError;
+            toolResult.usage = hookOverride?.usage ?? toolResult.usage;
           }
           session.messages.push(toolResult as any);
           (session as any)._emit?.({ type: "message_start", message: toolResult });
           (session as any)._emit?.({ type: "message_end", message: toolResult });
-          return res;
+          return { ...res, output: toolResult.content, details: toolResult.details, isError: toolResult.isError, usage: toolResult.usage };
         } catch (err: any) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           toolResult = {
@@ -741,25 +751,10 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
             isError: true,
             timestamp: Date.now(),
           };
-          if ((session as any).agent?.afterToolCall) {
-            try {
-              await (session as any).agent.afterToolCall(
-                {
-                  toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: input },
-                  args: input,
-                  result: toolResult,
-                  isError: true,
-                },
-                options.signal,
-              );
-            } catch {
-              // ignore hook error during exception handling
-            }
-          }
           session.messages.push(toolResult as any);
           (session as any)._emit?.({ type: "message_start", message: toolResult });
           (session as any)._emit?.({ type: "message_end", message: toolResult });
-          throw err;
+          return { output: toolResult.content, isError: true };
         } finally {
           (session as any)._emit?.({
             type: "tool_execution_end",

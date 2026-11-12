@@ -88,6 +88,7 @@ export function bridgePiToolToDurableTool(
         args,
       });
 
+      let result: AgentToolResult<any>;
       try {
         const updateCallback = (partial: any) => {
           if (!partial) return;
@@ -117,83 +118,81 @@ export function bridgePiToolToDurableTool(
             ? (options.toolContext as (id: string) => unknown)(callId)
             : options.toolContext;
 
-        const result = await tool.execute(
+        result = await tool.execute(
           callId,
           args,
           options.signal,
           updateCallback,
           effectiveToolContext,
         );
+      } catch (err: unknown) {
+        result = {
+          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+          details: {},
+          isError: true,
+        };
+      }
 
-        options.onActivity?.({
-          type: "end",
-          toolName: tool.name,
-          toolCallId: callId,
-        });
+      options.onActivity?.({
+        type: "end",
+        toolName: tool.name,
+        toolCallId: callId,
+      });
 
-        const output: ToolResultMessage["content"] = Array.isArray(result?.content)
-          ? (result.content as ToolResultMessage["content"])
-          : typeof result?.content === "string"
-            ? [{ type: "text" as const, text: result.content }]
-            : typeof (result as any)?.output === "string"
-              ? [{ type: "text" as const, text: (result as any).output }]
-              : Array.isArray((result as any)?.output)
-                ? (result as any).output
-                : [];
+      const output: ToolResultMessage["content"] = Array.isArray(result?.content)
+        ? (result.content as ToolResultMessage["content"])
+        : typeof result?.content === "string"
+          ? [{ type: "text" as const, text: result.content }]
+          : typeof (result as any)?.output === "string"
+            ? [{ type: "text" as const, text: (result as any).output }]
+            : Array.isArray((result as any)?.output)
+              ? (result as any).output
+              : [];
 
-        let finalOutput = output;
+      let finalOutput = output;
+      let finalDetails = result?.details;
+      let finalIsError = result?.isError === true;
+      let finalUsage = result?.usage;
+      try {
         if (options.afterToolCall) {
           const hookResult = await options.afterToolCall(
             {
               toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args },
               args,
-              result: { content: output, details: result?.details },
-              isError: result?.isError === true,
+              result: { content: output, details: result?.details, usage: result?.usage },
+              isError: finalIsError,
             },
             options.signal,
           );
-          if (hookResult?.content) {
-            finalOutput = hookResult.content;
-          }
+          finalOutput = hookResult?.content ?? finalOutput;
+          finalDetails = hookResult?.details ?? finalDetails;
+          finalIsError = hookResult?.isError ?? finalIsError;
+          finalUsage = hookResult?.usage ?? finalUsage;
         }
-
-        options.onToolResult?.({
-          role: "toolResult",
-          toolName: tool.name,
-          toolCallId: callId,
-          content: finalOutput,
-          details: result?.details,
-          isError: result?.isError === true,
-          timestamp: Date.now(),
-        });
-
-        return {
-          output: finalOutput,
-          isError: result?.isError === true,
-          details: result?.details as JsonValue,
-        };
       } catch (err: unknown) {
-        options.onActivity?.({
-          type: "end",
-          toolName: tool.name,
-          toolCallId: callId,
-        });
-
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        options.onToolResult?.({
-          role: "toolResult",
-          toolName: tool.name,
-          toolCallId: callId,
-          content: [{ type: "text" as const, text: errorMsg }],
-          isError: true,
-          timestamp: Date.now(),
-        });
-
-        return {
-          output: [{ type: "text" as const, text: errorMsg }],
-          isError: true,
-        };
+        finalOutput = [{ type: "text", text: err instanceof Error ? err.message : String(err) }];
+        finalDetails = {};
+        finalIsError = true;
+        finalUsage = undefined;
       }
+
+      options.onToolResult?.({
+        role: "toolResult",
+        toolName: tool.name,
+        toolCallId: callId,
+        content: finalOutput,
+        details: finalDetails,
+        isError: finalIsError,
+        usage: finalUsage,
+        timestamp: Date.now(),
+      });
+
+      return {
+        output: finalOutput,
+        isError: finalIsError,
+        details: finalDetails as JsonValue,
+        usage: finalUsage,
+      };
     },
   });
 }

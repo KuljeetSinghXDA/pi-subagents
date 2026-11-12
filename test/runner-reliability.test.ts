@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Harness, type HarnessSettings, MemoryStorage } from "@earendil-works/pi-durable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resumeAgent, runAgent, setGraceTurns } from "../src/agent-runner.js";
@@ -310,6 +310,41 @@ describe("runner reliability with real durable and Pi", () => {
     expect(Object.getOwnPropertyDescriptor(session.agent, "state")).toEqual(stateDescriptor);
     expect(Object.getOwnPropertyDescriptor(session, "isStreaming")).toEqual(streamingDescriptor);
     expect(session.isStreaming).toBe(false);
+  });
+
+  it("uses the finalized built-in tool result in the provider context and saved transcript", async () => {
+    writeFileSync(join(cwd, "private.txt"), "secret-original");
+    let received: ToolResultMessage | undefined;
+    const result = await start(async (index, context) => {
+      if (index === 0) return answer("", [{ type: "toolCall", id: "redact-read", name: "read", arguments: { path: "private.txt" } }]);
+      received = context.messages.find((message: { role: string }) => message.role === "toolResult");
+      return answer("done");
+    }, { onSessionCreated: (session: AgentSession) => {
+      session.agent.afterToolCall = async () => ({
+        content: [{ type: "text", text: "redacted" }], details: { redacted: true }, isError: true,
+      });
+    } });
+    expect(received?.content).toEqual([{ type: "text", text: "redacted" }]);
+    expect(received?.isError).toBe(true);
+    const saved = result.session.messages.find((message) => message.role === "toolResult");
+    expect(saved).toMatchObject({ content: received?.content, details: { redacted: true }, isError: true });
+  });
+
+  it.each([false, true])("finalizes thrown built-in errors once with hook failure=%s", async hookFails => {
+    let received: ToolResultMessage | undefined;
+    const hook = vi.fn(async () => {
+      if (hookFails) throw new Error("hook failed safely");
+      return { content: [{ type: "text", text: "redacted failure" }], details: { redacted: true }, isError: true };
+    });
+    const result = await start(async (index, context) => {
+      if (index === 0) return answer("", [{ type: "toolCall", id: "failed-read", name: "read", arguments: { path: "missing-private-file" } }]);
+      received = context.messages.find((message: { role: string }) => message.role === "toolResult");
+      return answer("done");
+    }, { onSessionCreated: (session: AgentSession) => { session.agent.afterToolCall = hook; } });
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(received?.content).toEqual([{ type: "text", text: hookFails ? "hook failed safely" : "redacted failure" }]);
+    expect(received?.isError).toBe(true);
+    expect(result.session.messages.find(message => message.role === "toolResult")).toMatchObject({ content: received?.content, isError: true });
   });
 
   it("returns saved completed bare answers rather than empty success", async () => {
