@@ -11,6 +11,7 @@ vi.mock("../src/worktree.js", () => ({
 
 import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { createAskAnswerTools, createNestedSubagentTools } from "../src/nested-tools.js";
 import { createGetResultTool } from "../src/tools/inspect-tools.js";
 import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 
@@ -41,6 +42,55 @@ async function paused() {
 }
 
 describe("manager reliability regressions", () => {
+  it("drops pending parent questions when the initial run rejects", async () => {
+    const run = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    vi.mocked(runAgent).mockReturnValueOnce(run.promise);
+    const id = manager.spawn(pi, ctx, "X", "go", { description: "questioner", isBackground: true });
+    const record = manager.getRecord(id)!;
+    const [ask] = createAskAnswerTools({ manager, pi: { sendMessage: vi.fn() } as any, parentAgentId: id });
+    await ask.execute("ask", { question: "Which module?" }, undefined, undefined, ctx);
+    expect(record.questions?.[0].state).toBe("delivered");
+
+    run.reject(new Error("provider failed"));
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.questions?.[0].state).toBe("dropped");
+    const result = await createGetResultTool({
+      resolveAgentRef: () => record, resolveMention: () => undefined,
+      isShowCostEnabled: () => false, outbox: { cancel: vi.fn() }, pi,
+    } as any).execute("result", { agent_id: id }, undefined, undefined, ctx);
+    expect(result.content[0]).toEqual(expect.objectContaining({ text: expect.not.stringContaining("[QUESTION for you") }));
+  });
+
+  it("includes nested resume spend in every ancestor's total", async () => {
+    const topRun = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    const middleRun = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    vi.mocked(runAgent).mockReturnValueOnce(topRun.promise).mockReturnValueOnce(middleRun.promise).mockResolvedValueOnce(outcome());
+    const topId = manager.spawn(pi, ctx, "X", "go", { description: "top", isBackground: true });
+    const middleId = manager.spawn(pi, ctx, "X", "go", { description: "middle", parentAgentId: topId });
+    const child = await manager.spawnAndWait(pi, ctx, "X", "go", { description: "child", parentAgentId: middleId });
+    vi.mocked(resumeAgent).mockImplementationOnce(async (_session, _prompt, options) => {
+      options!.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+      return { text: "continued", aborted: false, steered: false };
+    });
+    const [agent] = createNestedSubagentTools({
+      manager, pi, parentAgentId: middleId, depth: 2, maxSubagentDepth: 3,
+      allowedSubagents: "all", configCwd: ctx.cwd,
+    });
+    await agent.execute("resume", {
+      resume: child.id, prompt: "Continue", description: "continue", subagent_type: "X",
+    }, undefined, undefined, ctx);
+
+    for (const id of [child.id, middleId, topId]) {
+      expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+    }
+    middleRun.resolve(outcome());
+    await manager.getRecord(middleId)!.promise;
+    topRun.resolve(outcome());
+    await manager.getRecord(topId)!.promise;
+  });
+
   it("returns promptly from background gate resume and sends its prompt", async () => {
     const { id, record, run } = await paused();
     let returned = false;

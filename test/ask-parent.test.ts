@@ -488,6 +488,22 @@ describe("question routing across the owner chain", () => {
     expect(self.questions?.[0]?.state).toBe("delivered");
   });
 
+  it("a failed question delivery cannot reopen a superseded question", async () => {
+    const self = asker();
+    const owner = steerSession();
+    records.set("parent-1", record({ id: "parent-1", session: owner.session }));
+    let reject!: (error: Error) => void;
+    owner.steer.mockImplementationOnce(() => new Promise<void>((_resolve, no) => { reject = no; }));
+    const ask = tools()[ASK];
+    const first = execute(ask, { question: "First?" });
+    await execute(ask, { question: "Second?" });
+    reject(new Error("first delivery failed"));
+    await first;
+
+    expect(self.questions?.map(q => q.state)).toEqual(["superseded", "delivered"]);
+    expect(openQuestionsFooter(self)).not.toContain("First?");
+  });
+
   it("a rejected steer leaves the question open with no deliveredTo", async () => {
     const self = asker();
     const failing = vi.fn(async () => {

@@ -90,6 +90,24 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
+  it.each([false, true])("waits for terminal cleanup before consuming nested output with wait=%s", async wait => {
+    let finish!: () => void;
+    const record = { id: "child-1", type: "scout", status: "completed", result: "done", parentAgentId: "parent-1", resultConsumed: false, worktree: { path: "/retained/agent" },
+      promise: new Promise<void>(resolve => { finish = resolve; }) };
+    records.set(record.id, record);
+    const [, getResult] = tools();
+    let returned = false;
+    const pending = execute(getResult, { agent_id: record.id, wait }).then(result => { returned = true; return result; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    expect(record.resultConsumed).toBe(false);
+    record.result += "\nRecovery path: /retained/agent";
+    finish();
+    const result = await pending;
+    expect(result.content[0].text).toContain("Recovery path: /retained/agent");
+    expect(record.resultConsumed).toBe(true);
+  });
   it("allows any enabled agent when allowed_subagents is omitted", async () => {
     const [agent] = tools();
     const result = await execute(agent, {

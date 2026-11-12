@@ -417,6 +417,9 @@ export class AgentManager {
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
+        for (const q of record.questions ?? []) {
+          if (q.state === "open" || q.state === "delivered") q.state = "dropped";
+        }
         detach();
 
         if (record.outputCleanup) {

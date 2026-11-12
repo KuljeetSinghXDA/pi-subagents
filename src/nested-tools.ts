@@ -34,7 +34,7 @@ import type {
   IsolationMode,
   ThinkingLevel,
 } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
 
 /**
@@ -90,7 +90,10 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
-  resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
+  resume(id: string, prompt: string, signal?: AbortSignal, options?: {
+    maxTurns?: number;
+    onAssistantUsage?: (usage: LifetimeUsage) => void;
+  }): Promise<AgentRecord | undefined>;
 }
 
 export interface NestedToolContext {
@@ -234,6 +237,14 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         // back to the limit the child was spawned with, then the default.
         const resumed = await whileWaiting(context, () => context.manager.resume(params.resume!, params.prompt, signal, {
           maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
+          onAssistantUsage: (usage) => {
+            for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
+              const ancestor = context.manager.getRecord(id);
+              if (!ancestor) break;
+              addUsage(ancestor.lifetimeUsage, usage);
+              id = ancestor.parentAgentId;
+            }
+          },
         }));
         if (resumed) consumeTerminalResult(resumed);
         return resumed
@@ -425,11 +436,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      // Wait for completion if requested. Cancellation (e.g. the parent's tool
-      // call is aborted) stops only this wait; the nested child keeps running and
+      // Terminal status may precede cleanup; wait before serving its final output.
+      // Cancellation stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
+      if ((params.wait && (record.status === "running" || record.status === "queued")) ||
+        (record.worktree && record.status !== "running" && record.status !== "queued" && record.status !== "paused")) {
         await whileWaiting(context, () => waitForRecord(record, signal));
       }
       consumeTerminalResult(record);
@@ -547,8 +559,10 @@ export function createAskAnswerTools(context: AskAnswerContext): ToolDefinition[
         } catch {
           // Undeliverable right now: the question stays on the record and the
           // result-time footer still surfaces it to whoever reads the result.
-          q.state = "open";
-          q.deliveredTo = undefined;
+          if (q.state === "delivered") {
+            q.state = "open";
+            q.deliveredTo = undefined;
+          }
           return textResult(`Question ${q.id} recorded but could not be delivered mid-run; it will ride your result. Continue on your stated assumption.`);
         }
         const delivery = owner.blocking
