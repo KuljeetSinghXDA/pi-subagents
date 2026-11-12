@@ -93,6 +93,8 @@ Because it changes nothing, `c` works at both levels and on an agent that has al
 
 A run's own agents are not listed separately in the fleet list, the widget, the `/agents` menus or `@handle` resolution — they belong to the run, which reports for them. `c` in the inspector is the one way in to a child's conversation.
 
+The main agent can send `steer_subagent` to a running workflow child using the returned run ID as `workflow_id` and the child's script `label` as `agent_id`. Duplicate labels are rejected with matching child IDs; use an exact child agent ID without `workflow_id` to select one. Give children unique labels when you want to steer them by label. Steering redirects the child without collecting its result or replacing the workflow's waiting `agent()` call. Nested children remain under their parent's control; cross-extension RPC still excludes workflow children.
+
 ### 4. Edit and re-run
 
 Open the path from the `Script:` line, change it, and ask the model to run it again with `scriptPath`. That is the whole loop, and it is why the script is written to disk at all: iterating means editing a file, not asking the model to re-emit source it already produced.

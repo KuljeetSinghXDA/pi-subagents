@@ -11,6 +11,8 @@ import { formatAnswerSteer, getStatusNote, openQuestionsFooter, partialOutputSuf
 import type { AgentRecord, MentionResolution } from "../types.js";
 import { formatCost, formatDuration, getDisplayName } from "../ui/agent-widget.js";
 import { getLifetimeCost, getSessionContextPercent, type PendingUsagePool } from "../usage.js";
+import { collapse } from "../workflow/progress.js";
+import type { WorkflowTask } from "../workflow/task.js";
 
 export interface InspectToolsDeps {
   resolveAgentRef: (ref: string) => AgentRecord | undefined;
@@ -170,27 +172,48 @@ export function createGetResultTool(deps: InspectToolsDeps) {
   });
 }
 
-export function createSteerTool(deps: InspectToolsDeps) {
-  const { resolveAgentRef, isShowCostEnabled, pi } = deps;
+export function createSteerTool(deps: InspectToolsDeps & { workflowTasks: ReadonlyMap<string, WorkflowTask> }) {
+  const { resolveAgentRef, isShowCostEnabled, pi, workflowTasks } = deps;
 
   return defineTool({
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
       "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
-    promptSnippet: "Send a steering message to redirect a running background agent",
+      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents. " +
+      "For workflow children, use the exact child agent ID, or set workflow_id to the run ID and agent_id to the script label. " +
+      "Ambiguous labels are rejected. Nested children remain under their parent's control.",
+    promptSnippet: "Send a steering message to redirect a running agent, including workflow children",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: 'The agent name (e.g. "bold-curie") or ID to steer (must be currently running). Also accepts type handles like "@explore".',
+        description: 'The agent name (e.g. "bold-curie") or ID to steer (must be currently running). Also accepts type handles like "@explore". With workflow_id, use the child\'s script label instead.',
       }),
+      workflow_id: Type.Optional(Type.String({
+        description: "Workflow run ID returned by SubagentWorkflow. When set, agent_id is the child's exact script label, which must identify one child.",
+      })),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
-      const record = resolveAgentRef(params.agent_id);
-      if (!record || !isTopLevelAgent(record)) {
+      let record: AgentRecord | undefined;
+      if (params.workflow_id !== undefined) {
+        const task = workflowTasks.get(params.workflow_id);
+        if (!task) return textResult(`Workflow not found: "${params.workflow_id}".`);
+        const ids = new Set([...collapse(task.workflowProgress).agents.values()]
+          .filter(entry => entry.label === params.agent_id && entry.recordId !== undefined)
+          .map(entry => entry.recordId!));
+        if (ids.size > 1) {
+          return textResult(`Ambiguous workflow label "${params.agent_id}". Use an exact child agent ID without workflow_id. Matching IDs: ${[...ids].join(", ")}`);
+        }
+        const id = [...ids][0];
+        record = id === undefined ? undefined : resolveAgentRef(id);
+        if (record?.workflowId !== params.workflow_id) record = undefined;
+      } else {
+        record = resolveAgentRef(params.agent_id);
+      }
+      // Workflow ownership restricts result collection, not steering; nested children still belong to their parent.
+      if (!record || record.parentAgentId !== undefined) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
       if (record.status !== "running") {

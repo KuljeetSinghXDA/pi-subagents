@@ -524,6 +524,7 @@ export default function (pi: ExtensionAPI) {
   registerToolReportingUsage(pi, createSteerTool({
     resolveAgentRef,
     resolveMention,
+    workflowTasks,
     isShowCostEnabled,
     outbox,
     pi,

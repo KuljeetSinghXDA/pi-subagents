@@ -579,9 +579,16 @@ A finished agent's result stays retrievable after its in-memory record is cleane
 
 Send a steering message to a running agent. The message interrupts after the current tool execution.
 
+The main agent can also steer a workflow child using `workflow_id` with the run ID returned by `SubagentWorkflow` and `agent_id` with the child's script `label`. Duplicate labels are rejected with matching child IDs; use one exact child agent ID without `workflow_id` to select it. Workflow children do not have `@handle` names. Steering does not collect their results or replace the workflow's waiting `agent()` call. Nested children remain under their parent's control.
+
+```json
+{"workflow_id": "wf_example", "agent_id": "review:security", "message": "Also check token expiry."}
+```
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent name (e.g. `bold-curie`) or ID to steer (must be currently running). Also accepts type handles like `@explore` |
+| `agent_id` | string | yes | Agent name (e.g. `bold-curie`) or ID to steer (must be currently running). Also accepts type handles like `@explore`. With `workflow_id`, use the child's exact script label |
+| `workflow_id` | string | no | Workflow run ID returned by `SubagentWorkflow`; scopes `agent_id` to a script label |
 | `message` | string | yes | Message to inject into agent conversation |
 
 ### `answer_subagent`
