@@ -86,6 +86,7 @@ import {
 } from "./runner-helpers.js";
 import {
   getRememberAgents,
+  isUncutPromptProvider,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
 } from "./runner-settings.js";
@@ -118,14 +119,19 @@ async function prepareAgentSystemPrompt(
   config: ReturnType<typeof getConfig>,
   effectiveCwd: string,
   configCwd: string,
+  model: ReturnType<typeof resolveDefaultModel>,
   options: RunOptions,
 ): Promise<PreparedSystemPrompt> {
   const env = await detectEnv(options.pi, effectiveCwd);
 
-  // Get parent system prompt for append-mode agents, without the sections the
-  // child session renders itself (skills, cwd, extension sections).
+  // Get parent system prompt for append-mode agents. Bridge providers need the
+  // full assembled prompt to project it into their harness; every other provider
+  // gets the sections the child renders itself (skills, cwd, extension sections)
+  // stripped so they are not duplicated.
   const parentSystemPrompt = typeof ctx.getSystemPrompt === "function"
-    ? inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd)
+    ? isUncutPromptProvider(model?.provider)
+      ? ctx.getSystemPrompt()
+      : inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd)
     : "";
 
   const extras: PromptExtras = {};
@@ -234,6 +240,8 @@ async function createRunnerResourceLoader(
   config: ReturnType<typeof getConfig>,
   configCwd: string,
   effectiveCwd: string,
+  agentDir: string,
+  settingsManager: SettingsManager,
   systemPrompt: string,
   noSkills: boolean,
   options: RunOptions,
@@ -241,7 +249,6 @@ async function createRunnerResourceLoader(
   const isolated = agentConfig?.isolated ?? options.isolated;
   const extensions = isolated ? false : config.extensions;
   const excludeExtensions = isolated ? undefined : config.excludeExtensions;
-  const agentDir = getAgentDir();
 
   const { extNames, narrowing } = parseExtSelectors(
     isolated ? [] : (agentConfig?.extSelectors ?? []),
@@ -275,7 +282,6 @@ async function createRunnerResourceLoader(
         };
 
   const projectTrusted = typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
-  const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
   const sessionSettingsManager =
     resolve(effectiveCwd) === resolve(configCwd)
       ? settingsManager
@@ -394,23 +400,16 @@ interface SessionToolLoadout {
 }
 
 /**
- * SRP Phase 3: Model resolution, custom tools creation (nested, ask, structured), and tool admission calculation.
+ * Resolve the run model before the prompt is built: append-mode inheritance
+ * depends on the provider, and a bridge provider needs the parent prompt verbatim.
  */
-function buildSessionToolLoadout(
+function resolveRunModel(
   ctx: ExtensionContext,
   type: SubagentType,
   agentConfig: AgentConfig | undefined,
-  loader: DefaultResourceLoader,
   settingsManager: SettingsManager,
-  toolNames: string[],
-  extNames: Set<string>,
-  mcpToolPatterns: string[] | undefined,
-  noExtensions: boolean,
-  nested: PreparedNestedTools,
   options: RunOptions,
-): SessionToolLoadout {
-  const isolated = agentConfig?.isolated ?? options.isolated;
-
+): ReturnType<typeof resolveDefaultModel> {
   let model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
@@ -432,6 +431,27 @@ function buildSessionToolLoadout(
       toolName: `model-error:model "${agentConfig.model}" pinned by agent "${type}" is ${notFound ? "not a known model" : "unavailable (provider not authenticated or model disabled)"} — running on the parent model instead`,
     });
   }
+
+  return model;
+}
+
+/**
+ * SRP Phase 3: Model resolution, custom tools creation (nested, ask, structured), and tool admission calculation.
+ */
+function buildSessionToolLoadout(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  agentConfig: AgentConfig | undefined,
+  loader: DefaultResourceLoader,
+  toolNames: string[],
+  extNames: Set<string>,
+  mcpToolPatterns: string[] | undefined,
+  noExtensions: boolean,
+  nested: PreparedNestedTools,
+  model: ReturnType<typeof resolveDefaultModel>,
+  options: RunOptions,
+): SessionToolLoadout {
+  const isolated = agentConfig?.isolated ?? options.isolated;
 
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
 
@@ -1609,22 +1629,29 @@ export async function runAgent(
   const configCwd = options.configCwd ?? effectiveCwd;
   const config = getConfig(type);
 
+  // Resolve the model before the prompt: append-mode inheritance depends on the
+  // provider, and a bridge provider needs the parent prompt verbatim.
+  const agentDir = getAgentDir();
+  const projectTrusted = ctx.isProjectTrusted();
+  const runSettingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
+  const model = resolveRunModel(ctx, type, agentConfig, runSettingsManager, options);
+
   // 1. Prepare agent system prompt, memory, and skills
   const prepared = await prepareAgentSystemPrompt(
-    ctx, type, agentConfig, config, effectiveCwd, configCwd, options,
+    ctx, type, agentConfig, config, effectiveCwd, configCwd, model, options,
   );
   const { systemPrompt, toolNames, noSkills } = prepared;
 
   // 2. Setup resource loader, extension overrides, and configuration warnings
   const resourceContext = await createRunnerResourceLoader(
-    ctx, type, agentConfig, config, configCwd, effectiveCwd, systemPrompt, noSkills, options,
+    ctx, type, agentConfig, config, configCwd, effectiveCwd, agentDir, runSettingsManager, systemPrompt, noSkills, options,
   );
 
-  // 3. Resolve model and compute tool admission loadout
+  // 3. Compute the tool admission loadout
   const toolLoadout = buildSessionToolLoadout(
-    ctx, type, agentConfig, resourceContext.loader, resourceContext.sessionSettingsManager,
+    ctx, type, agentConfig, resourceContext.loader,
     toolNames, resourceContext.extNames, resourceContext.mcpToolPatterns, resourceContext.noExtensions,
-    prepared.nested, options,
+    prepared.nested, model, options,
   );
 
   // 4. Instantiate session, bind extensions (including MCP), and build durable registry

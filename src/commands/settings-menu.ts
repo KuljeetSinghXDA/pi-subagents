@@ -11,9 +11,11 @@ import {
 } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import {
+  DEFAULT_UNCUT_PROMPT_PROVIDERS,
   getDefaultMaxTurns,
   getGraceTurns,
   getRememberAgents,
+  getUncutPromptProviders,
   setDefaultMaxTurns,
   setGraceTurns,
   setRememberAgents,
@@ -100,6 +102,11 @@ export interface SettingsMenuDeps {
 }
 
 function snapshotSettings(deps: SettingsMenuDeps) {
+  const uncutPromptProviders = [...getUncutPromptProviders()];
+  // Do not pin the default into a project file just because the menu saved
+  // another row; only an explicit departure from the default is persisted.
+  const defaultUncut = uncutPromptProviders.length === DEFAULT_UNCUT_PROMPT_PROVIDERS.length
+    && uncutPromptProviders.every((provider, index) => provider === DEFAULT_UNCUT_PROMPT_PROVIDERS[index]);
   return {
     maxConcurrent: deps.manager.getMaxConcurrent(),
     maxConcurrentForeground: deps.manager.getMaxConcurrentForeground(),
@@ -126,6 +133,7 @@ function snapshotSettings(deps: SettingsMenuDeps) {
     showModel: deps.isShowModelEnabled(),
     packageAgents: getPackageAgentsGate(),
     packageWorkflows: getPackageWorkflowsGate(),
+    uncutPromptProviders: defaultUncut ? undefined : uncutPromptProviders,
     uiStyle: deps.getUIStyle(),
     viewerStyle: deps.getViewerStyle(),
   } satisfies SubagentsSettings;
