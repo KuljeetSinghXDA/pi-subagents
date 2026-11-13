@@ -18,7 +18,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveSpawnType } from "./agent-types.js";
 import { getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type { AgentRecord, SubagentType } from "./types.js";
-import { formatDuration, getDisplayName } from "./ui/agent-widget.js";
+import { formatAge, formatDuration, getDisplayName } from "./ui/agent-widget.js";
 
 /** `customType` of the session entry a finished top-level agent appends. */
 export const AGENT_RECORD_ENTRY_TYPE = "subagents:record";
@@ -126,10 +126,15 @@ export function findAgentRecordEntry(
   return named;
 }
 
-/** `get_subagent_result`'s answer from a persisted record, once the live record is gone. */
+/**
+ * `get_subagent_result`'s answer from a persisted record, once the live record
+ * is gone. The record lasts as long as the session file, so it states when the
+ * run finished: a days-old result must not read as current (#436).
+ */
 export function formatSavedAgentRecord(saved: AgentRecordEntryData): string {
   return `Agent: ${saved.id}${saved.alias ? ` (${saved.alias})` : ""}\n` +
     `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+    (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");

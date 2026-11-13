@@ -90,6 +90,15 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
+  // A child inherits the main session's Agent guideline "you will be notified on
+  // completion", which is false for nested children: they send nothing and are
+  // stopped when the parent finishes. The tool's own description must say so.
+  it("tells the parent that background nested agents must be collected", () => {
+    const [agent] = tools();
+    expect(agent.description).toContain("does NOT notify you");
+    expect(agent.description).toContain("get_subagent_result");
+  });
+
   it.each([false, true])("waits for terminal cleanup before consuming nested output with wait=%s", async wait => {
     let finish!: () => void;
     const record = { id: "child-1", type: "scout", status: "completed", result: "done", parentAgentId: "parent-1", resultConsumed: false, worktree: { path: "/retained/agent" },

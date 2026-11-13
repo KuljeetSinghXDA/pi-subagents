@@ -20,7 +20,7 @@ import type { AgentRecord, UIStyle, ViewerStyle } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import type { WorkflowRunControls } from "./agent-hub.js";
 import { openAgentHub } from "./agent-hub.js";
-import { type AgentActivity, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
+import { type AgentActivity, buildInvocationTags, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
 import { type ViewerBackgroundAction } from "./conversation-viewer.js";
 import type { WorkflowDialogSource } from "./workflow-view.js";
 
@@ -197,6 +197,14 @@ export class FleetList {
     private backgroundAction?: (record: AgentRecord, notify: (message: string) => void) => ViewerBackgroundAction,
     private uiStyle: () => UIStyle = () => "pi",
     private viewerStyle: () => ViewerStyle = () => "chat",
+    /**
+     * Read live at render time, like `showCost`. Whether each row names the
+     * model driving the run and the thinking level it is running at. Defaults to
+     * off — the extension supplies the user's `showModel` setting — because the
+     * row is already dense and the same pair is shown unconditionally in the
+     * conversation viewer and the `Agent` tool result.
+     */
+    private showModel: () => boolean = () => false,
   ) {}
 
   // ---- Lifecycle ----
@@ -381,10 +389,19 @@ export class FleetList {
    */
   private agentRosterEntries(): AgentEntry[] {
     const now = Date.now();
-    const eligible = this.manager.listAgents().filter(a =>
+    const all = this.manager.listAgents();
+    // The viewed agent stays listed, and a nested one needs its ancestors to
+    // hang from: they settle together (a parent stops its children), so the
+    // parent would otherwise drop out first and take the viewed row with it.
+    const pinned = new Set<string>();
+    for (let id = this.viewingAgentId; id !== undefined && !pinned.has(id); ) {
+      pinned.add(id);
+      id = all.find(a => a.id === id)?.parentAgentId;
+    }
+    const eligible = all.filter(a =>
       !a.workflowId && a.session && (
         a.status === "running" || a.status === "queued" || a.status === "paused"
-        || a.id === this.viewingAgentId
+        || pinned.has(a.id)
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       )
     );
@@ -407,7 +424,8 @@ export class FleetList {
       list.sort((a, b) => a.startedAt - b.startedAt);
     }
 
-    const roots = eligible.filter(a => !a.parentAgentId || !eligibleMap.has(a.parentAgentId));
+    // A child whose parent is not listed has no row to hang from: drop it.
+    const roots = eligible.filter(a => !a.parentAgentId);
     roots.sort((a, b) => a.startedAt - b.startedAt);
 
     const result: AgentEntry[] = [];
@@ -896,12 +914,20 @@ export class FleetList {
     } else {
       left = `  ${this.bullet(rosterIndex, sel, theme, hasBgTasks)} ${name}  ${description}`;
     }
-    // The record, not the activity tracker — see the note in AgentWidget's
-    // running line: only the record carries a nested child's spend, and only it
-    // outlives the agent.
-    const tokens = getLifetimeTotal(record.lifetimeUsage);
+    if (this.showModel()) {
+      // After the description, not in the stats: rightAlign truncates only the
+      // left side, so here the model is cut first and the name survives. Bare
+      // level (`sonnet 4.6 · high`), matching the widget's running line.
+      const { modelName, thinking } = buildInvocationTags(record.invocation);
+      const model = [modelName, thinking].filter(Boolean).join(" · ");
+      if (model) left += theme.fg(selected ? "text" : "dim", ` · ${model}`);
+    }
+    // The record, not the activity tracker: only the record outlives the agent.
+    // Its OWN usage, not `lifetimeUsage` — that one folds in every descendant,
+    // and the descendants have rows of their own here.
+    const tokens = getLifetimeTotal(record.ownUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
-    const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
+    const cost = this.showCost() ? formatCost(getLifetimeCost(record.ownUsage)) : "";
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);

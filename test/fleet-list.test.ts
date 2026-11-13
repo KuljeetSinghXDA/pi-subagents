@@ -86,6 +86,7 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
     startedAt: Date.now(),
     session: FAKE_SESSION as any,
     lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 },
+    ownUsage: { input: 13100, output: 0, cacheWrite: 0 },
     compactionCount: 0,
     ...over,
   } as AgentRecord;
@@ -275,6 +276,53 @@ describe("FleetList navigation", () => {
   it("also activates on ← (matches the '← for agents' hint)", () => {
     const h = harness([makeRecord()]);
     expect(h.press(LEFT)).toEqual({ consume: true });
+  });
+
+  it("keeps a viewed child listed after its parent would have dropped out", () => {
+    // A parent settling stops its children, so both finish together; the child
+    // a reader is viewing stays listed, and so must the row it hangs from.
+    const done = Date.now() - 60_000;
+    const agents = [
+      makeRecord({ id: "top", description: "parent", startedAt: 1000 }),
+      makeRecord({ id: "kid", description: "the child", parentAgentId: "top", startedAt: 2000 }),
+    ];
+    const h = harness(agents);
+    (h.fleet as unknown as { viewingAgentId?: string }).viewingAgentId = "kid";
+    agents[0] = { ...agents[0], status: "completed", completedAt: done } as AgentRecord;
+    agents[1] = { ...agents[1], status: "completed", completedAt: done } as AgentRecord;
+    h.fleet.update();
+    const rendered = h.render(200).map(plain).join("\n");
+    expect(rendered).toContain("parent");
+    expect(rendered).toContain("the child");
+  });
+
+  it("drops a child whose parent is not listed", () => {
+    const h = harness([
+      makeRecord({ id: "gone", description: "finished parent", status: "completed", completedAt: Date.now() - 60_000 }),
+      makeRecord({ id: "orphan", description: "orphan child", parentAgentId: "gone" }),
+      makeRecord({ id: "live", description: "live agent" }),
+    ]);
+    const rendered = h.render().map(plain).join("\n");
+    expect(rendered).toContain("live agent");
+    expect(rendered).not.toContain("orphan child");
+  });
+
+  it("shows each agent's own usage, not the total that folds in its children", () => {
+    const h = harness([
+      makeRecord({
+        id: "top", description: "parent", startedAt: 1000,
+        lifetimeUsage: { input: 500_000, output: 0, cacheWrite: 0 },
+        ownUsage: { input: 163_400, output: 0, cacheWrite: 0 },
+      }),
+      makeRecord({
+        id: "kid", description: "child", parentAgentId: "top", startedAt: 2000,
+        lifetimeUsage: { input: 336_600, output: 0, cacheWrite: 0 },
+        ownUsage: { input: 336_600, output: 0, cacheWrite: 0 },
+      }),
+    ]);
+    const lines = h.render(200).map(plain);
+    expect(lines.find(l => l.includes("parent"))).toContain("↓ 163.4k tokens");
+    expect(lines.find(l => l.includes("child"))).toContain("↓ 336.6k tokens");
   });
 
   it("p pauses the selected running agent and consumes the key", () => {
@@ -981,8 +1029,11 @@ describe("FleetList overlay lifecycle", () => {
 describe("FleetList cost display", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-  function row(showCost: boolean, cost: number, activity?: Map<string, AgentActivity>): string {
-    const record = makeRecord({ lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0, cost } });
+  function row(showCost: boolean, cost: number, activity?: Map<string, AgentActivity>, lifetimeCost = 0): string {
+    const record = makeRecord({
+      ownUsage: { input: 13100, output: 0, cacheWrite: 0, cost },
+      lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0, cost: lifetimeCost },
+    });
     const fleet = new FleetList(fakeManager([record]), activity ?? new Map(), () => showCost);
     let factory: any;
     fleet.setUICtx({
@@ -1007,6 +1058,12 @@ describe("FleetList cost display", () => {
     expect(row(true, 0)).not.toContain("$");
   });
 
+  it("bills the row's own spend, not the total that folds in its children", () => {
+    const out = row(true, 0.0042, undefined, 0.9);
+    expect(out).toContain("~$0.0042");
+    expect(out).not.toContain("~$0.90");
+  });
+
   it("reads the record, so the figures do not change when the agent finishes", () => {
     // Spend used to come from the live activity tracker while an agent ran and
     // from its record once the tracker was deleted. The two disagree: only the
@@ -1021,6 +1078,89 @@ describe("FleetList cost display", () => {
     } as unknown as AgentActivity]]);
 
     expect(row(true, 0.0042, tracked)).toBe(row(true, 0.0042));
+  });
+});
+
+describe("FleetList model display", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  const SONNET: AgentRecord["invocation"] = { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" };
+
+  /** A fleet over `records`, with `showModel` read live from `state.on`. */
+  function mount(state: { on: boolean }, records = [makeRecord({ invocation: SONNET })]) {
+    const fleet = new FleetList(fakeManager(records), new Map(), () => false, undefined, undefined, undefined, undefined, () => state.on);
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    return {
+      fleet,
+      render: (width = 120): string => {
+        fleet.update();
+        return factory({ requestRender: () => {}, terminal: { columns: width, rows: 40 } }, theme).render(width).join("\n");
+      },
+    };
+  }
+
+  it("names the model and bare thinking level after the description when enabled", () => {
+    const out = mount({ on: true }).render();
+    // Bare level, not "thinking: high" — the label is dropped on this surface,
+    // matching the widget's running row.
+    expect(out).toContain("Sleep then report 1 · sonnet 4.6 · high");
+    expect(out).not.toContain("thinking:");
+    // On the left, ahead of the right-aligned stats.
+    expect(out.indexOf("sonnet 4.6")).toBeLessThan(out.indexOf("token"));
+    // The short label, never the canonical id.
+    expect(out).not.toContain("anthropic/claude-sonnet-4-6");
+  });
+
+  it("shows no model or thinking level when disabled", () => {
+    const out = mount({ on: false }).render();
+    expect(out).not.toContain("sonnet 4.6");
+    expect(out).not.toContain("high");
+  });
+
+  it("keeps the (asked X) annotations", () => {
+    const out = mount({ on: true }, [makeRecord({
+      invocation: { modelName: "haiku 4.5", requestedModel: "opus", thinking: "high", requestedThinking: "max" },
+    })]).render();
+    expect(out).toContain("haiku 4.5 (asked opus) · high (asked max)");
+  });
+
+  it("cuts the model, not the agent name or stats, on a narrow terminal", () => {
+    const out = mount({ on: true }, [makeRecord({
+      invocation: { modelName: "haiku 4.5", requestedModel: "opus", thinking: "high", requestedThinking: "max" },
+    })]).render(60);
+    expect(out).toContain("Agent  Sleep then report 1");
+    expect(out).toContain("13.1k tokens");
+    expect(out).not.toContain("(asked max)");
+  });
+
+  it("names each nested row's own model after its tree prefix and description", () => {
+    const now = Date.now();
+    const records = [
+      makeRecord({ id: "top", description: "parent", startedAt: now - 2000, invocation: SONNET }),
+      makeRecord({ id: "kid", description: "child", parentAgentId: "top", startedAt: now - 1000, invocation: { modelName: "haiku 4.5", thinking: "low" } }),
+    ];
+    const wide = plain(mount({ on: true }, records).render());
+    expect(wide).toContain("parent · sonnet 4.6 · high");
+    expect(wide).toContain("└─ ○ Agent  child · haiku 4.5 · low");
+    // Narrow: the indented child loses its model, never its rail or name.
+    const narrow = plain(mount({ on: true }, records).render(48));
+    expect(narrow).toContain("└─ ○ Agent  child");
+    expect(narrow).not.toContain("haiku 4.5 · low");
+  });
+
+  it("picks up a live toggle on the next update", () => {
+    const state = { on: false };
+    const { render } = mount(state);
+    expect(render()).not.toContain("sonnet 4.6");
+    state.on = true;
+    expect(render()).toContain("sonnet 4.6 · high");
   });
 });
 

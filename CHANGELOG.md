@@ -9,13 +9,35 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
+
+> **⚠️ Behavior change — the built-in `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). Its children count toward `maxConcurrentNested`, and depth stays at `maxSubagentDepth` `2`, so a subagent's children cannot spawn again. Inside a workflow it does not delegate, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` without `allowed_subagents`; an earlier ejected copy already behaves that way. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
+
+### Added
+
+- **`/agents` → Settings has a filter.** Typing narrows the rows by label, the arrow keys move within the matches, and Enter on a numeric row opens that row's editor even while the list is filtered.
+
+- **`/agents → Running agents` lists nested subagents under their parent.** The list now mirrors FleetView's tree, so a finished nested child stays reachable after FleetView's linger expires; workflow agents stay in the workflow inspector. FleetView rows now report each agent's own tokens and cost (`AgentRecord.ownUsage`) rather than the total that folds in descendants, which count on their own rows. ([#446](https://github.com/tintinweb/pi-subagents/issues/446))
+
+- **`maxConcurrentNested` caps how many nested subagents run at once** ([#427](https://github.com/tintinweb/pi-subagents/pull/427), part of [#352](https://github.com/tintinweb/pi-subagents/issues/352)). Nested children skip both queueing pools, so nothing bounded a parent's fan-out. A nested spawn over the limit (default `10`, `0` = unlimited) is refused rather than queued, since queueing a child behind its waiting parent would deadlock. Top-level and workflow agents neither count nor are refused. In `/agents → Settings`, "Max concurrency" is now "Max background concurrency", next to the new "Max nested concurrency" and "Nested depth".
+
 ### Changed
+
+- **The `/agents` menu dispatches on each row's fixed value instead of a label prefix.** Rows carry live counts in their labels, so a label that only looks like a row can no longer route to the wrong handler; the labels themselves are unchanged.
+
+- **`showModel` now names the model on the fleet view rows, and both live surfaces show the bare thinking level.** With `showModel` on, each fleet row names the model and level after the description; the level renders bare (`sonnet 4.6 · high`) on the fleet row and the widget's running line instead of `thinking: high`. The `Agent` tool result and conversation viewer keep the labelled form. ([#447](https://github.com/tintinweb/pi-subagents/issues/447))
 
 - **Agent memory supports display names that are not filesystem-safe.** `resolveMemoryDir` keeps existing safe names on their current paths and hashes other names into a reserved `.encoded-<sha256>` directory instead of refusing them. A safe name must start with an ASCII letter or digit and use only `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` after that, so a name starting with `_` or `-` is hashed; a leading dot is rejected. Distinct names stay distinct, so names such as `Code Reviewer` or `审查员` can both use memory. Existing memory under an older alias is not migrated; move it by hand if needed. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
 
 - **Foreground resume of a running or queued agent is refused.** `resumeRecord` now throws `Agent "<id>" is still <status>` for a foreground resume, and the `Agent` tool reports that message and points at `steer_subagent`; use steer while the run is live. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
 
+- **The built-in `general-purpose` agent delegates, matching Claude Code** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). In Claude Code, `general-purpose` keeps its `Agent` tool and `Explore`/`Plan` drop it. Here nested delegation required a custom agent with `allowed_subagents`, so asking for "a subagent that spawns subagents" got a `general-purpose` child with no `Agent` tool. The allowlist stays opt-in for custom agents: `general-purpose` already has every tool, so delegation grants it nothing new. When it can spawn, its prompt carries Claude Code's line telling it not to hand its whole task to a single child.
+
 ### Fixed
+
+- **Schedule-store lock contention fails fast instead of blocking the event loop** (ported from [tintinweb/pi-subagents#266](https://github.com/tintinweb/pi-subagents/issues/266)). A lock left by the same PID or a dead process is reclaimed; a lock held by a live foreign process, an empty/garbage lock, or an unreadable lock throws immediately instead of busy-waiting for roughly five seconds, and an unreadable lock is never unlinked. Fire-time persistence failures emit a `subagents:scheduled` error event through `SubagentScheduler.persist` instead of throwing out of a timer tick or rejecting at completion.
+
+- **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through the injected keybindings the way its scroll and expand keys already did. Remapping those actions no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the rest of pi uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
 
 - **Reliability fixes from #11, part 1:** durable sessions now honor the resolved built-in tool list, so Explore, Plan, and `disallowedTools` agents cannot call `write` or `edit`. Workflow resume, retry, and skip spend is counted once, an over-long workflow result is saved beside the journal, and worktrees keep unpreserved files while result reads wait for cleanup. Agent-file model pins resolve like caller-supplied pins, and the schedule store reloads persisted jobs before mutating. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
 
@@ -28,6 +50,10 @@ check the entries below for behaviour changes.
 - **Steering acceptance and UI recovery:** `AgentManager.steer` now resolves only after Pi's session queue accepts the message and retains a queued steer that fails delivery for the next session flush; the RPC and `@handle` mention paths wait for that answer and report delivery failures instead of acknowledging a steer that never arrived. A durable run's admission happens asynchronously, so an admission failure there surfaces later as a run failure, not as a rejected steer. Accepted steering and tool history now appear in the live conversation as durable commits them. The viewer keeps a rejected draft with the error, stays escapable while a send is pending and ignores a late result after it closes. The fleet bar returns after the hub closes or fails to open, leaves an explicit dismissal intact, and reports a failed open instead of dropping the rejection. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
 
 - **Main-agent steering of workflow children:** `steer_subagent` accepts an optional `workflow_id` with the child's script `label`, rejects a duplicate label with the matching child IDs, and says when the label's child has not spawned yet. Steering redirects the child without collecting its result or replacing the workflow's waiting `agent()` call; nested children stay under their parent's control, and cross-extension RPC still excludes workflow children. ([#11](https://github.com/ahati/pi-subagents-hub/pull/11) — thanks [@KuljeetSinghXDA](https://github.com/KuljeetSinghXDA))
+
+- **Finished nested subagents no longer outlive their parent across a session switch.** On `/new` or a session switch, finished agents whose result was never read stay in memory. A nested child's result is only ever read by its parent, so nothing marked it read: it stayed in memory with its session still loaded after its parent was gone. It is now removed along with its parent; running, queued, and paused children stay.
+
+- **`get_subagent_result` says when a saved result is from** ([#436](https://github.com/tintinweb/pi-subagents/issues/436) — thanks [@EndUser123](https://github.com/EndUser123)). Once the live record is gone, the answer comes from the session's saved record, which lasts as long as the session, so a days-old result read as current. That answer now carries a `Finished:` line with the time and age (`2026-11-10T14:14Z (2d ago)`). It matters most for handles: after a reload, `explore` resolves to the most recent saved run, however old.
 
 ## [2026.11.091] - 2026-11-09
 

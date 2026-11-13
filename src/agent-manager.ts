@@ -2,6 +2,9 @@
  * agent-manager.ts — Tracks agents, background execution, resume support.
  *
  * Modularized facade orchestrating ConcurrencyPool, AgentRegistry, and ResumeHandler.
+ *
+ * Nested children take no pool slot; their width is bounded by
+ * `maxConcurrentNested`, which refuses rather than queues — see `spawn`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -15,6 +18,7 @@ import {
   countToolUse,
   createPauseGate,
   DEFAULT_MAX_CONCURRENT,
+  DEFAULT_MAX_CONCURRENT_NESTED,
   externallyHalted,
   GatedRecord,
   gateOf,
@@ -60,6 +64,7 @@ export class AgentManager {
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
   private startups = new Map<string, Promise<void>>();
+  private maxConcurrentNested = DEFAULT_MAX_CONCURRENT_NESTED;
 
   get runningBackground(): number {
     return this.pool.runningBackground;
@@ -116,6 +121,29 @@ export class AgentManager {
     return this.pool.getMaxConcurrentForeground();
   }
 
+  /** Update the cap on running nested children, over which nested spawns are refused. 0 = unlimited. */
+  setMaxConcurrentNested(n: number) {
+    // Nothing queues on this cap, so a change has nothing to drain.
+    this.maxConcurrentNested = Math.max(0, n);
+  }
+
+  getMaxConcurrentNested(): number {
+    return this.maxConcurrentNested;
+  }
+
+  /**
+   * Running nested children outside workflows — what `maxConcurrentNested`
+   * caps. Read from the records rather than kept as a counter, so no start or
+   * settle path can leak a slot.
+   */
+  private runningNestedCount(): number {
+    let n = 0;
+    for (const record of this.registry.agents.values()) {
+      if (record.status === "running" && record.parentAgentId !== undefined && record.workflowId === undefined) n++;
+    }
+    return n;
+  }
+
   private drainQueue(): void {
     this.pool.drainQueue(id => this.registry.agents.get(id));
   }
@@ -153,6 +181,25 @@ export class AgentManager {
   ): string {
     assertValidSpawnCwd(options.cwd);
 
+    // Nested fan-out is capped by refusing, not queueing: a nested child cannot
+    // queue — its parent waits on it while holding a slot — so refusing is the
+    // only bound that cannot deadlock. The parent is told to do the work itself,
+    // as Claude Code tells it over CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS. Only
+    // nested children count; top-level agents have their pools, and a
+    // workflow's agents the run's own cap.
+    if (
+      options.parentAgentId !== undefined &&
+      options.workflowId === undefined &&
+      this.maxConcurrentNested > 0 &&
+      this.runningNestedCount() >= this.maxConcurrentNested
+    ) {
+      throw new Error(
+        `Concurrent nested subagent limit reached. You can run ${this.maxConcurrentNested} nested subagents at once. Do not retry. ` +
+          "Complete this task directly with your tools, or if the user wants more, " +
+          "ask them to raise maxConcurrentNested in /agents → Settings.",
+      );
+    }
+
     // A reclaimed id must not be live: the record would replace the one in the
     // map, orphaning its run beyond the reach of stop and `abortAll()`.
     // Callers reopen only what they found evicted; this keeps that true.
@@ -182,6 +229,7 @@ export class AgentManager {
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+      ownUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
       isBackground: options.isBackground,
       blocking: options.blocking,
@@ -347,6 +395,7 @@ export class AgentManager {
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        addUsage(record.ownUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },
@@ -695,10 +744,25 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Called on session start/switch so tasks from a prior session don't persist.
+   * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
+   * (resultConsumed=false); the 10-minute cleanup timer evicts them once read.
+   * A nested child is spared only while its parent stays: the parent is its
+   * only reader, and nothing marks it consumed when the parent collects it.
+   */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.registry.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
+      this.removeRecord(id, record);
+    }
+    // One pass reaches grandchildren too: the map is in spawn order, so a
+    // parent is visited, and removed, before its children. A paused child is
+    // user intent, not a settled result, so it stays for /continue.
+    for (const [id, record] of this.registry.agents) {
+      if (record.status === "running" || record.status === "queued" || record.status === "paused") continue;
+      if (record.parentAgentId === undefined || this.registry.agents.has(record.parentAgentId)) continue;
       this.removeRecord(id, record);
     }
     this.registry.clearTombstones();

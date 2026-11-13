@@ -192,6 +192,7 @@ export async function resumeRecord(
     onTextDelta: options?.onTextDelta,
     onAssistantUsage: (usage: LifetimeUsage) => {
       addUsage(record.lifetimeUsage, usage);
+      addUsage(record.ownUsage, usage);
       onUsage?.(record, usage);
       options?.onAssistantUsage?.(usage);
     },
@@ -294,6 +295,7 @@ export function startResume(
     onTextDelta: options.onTextDelta,
     onAssistantUsage: (usage: LifetimeUsage) => {
       addUsage(record.lifetimeUsage, usage);
+      addUsage(record.ownUsage, usage);
       onUsage?.(record, usage);
       options.onAssistantUsage?.(usage);
     },

@@ -64,6 +64,16 @@ describe("documented defaults (README:441)", () => {
     }
   });
 
+  it("nested concurrency defaults to 10", async () => {
+    const { AgentManager } = await import("../src/agent-manager.js");
+    const manager = new AgentManager();
+    try {
+      expect(manager.getMaxConcurrentNested()).toBe(10);
+    } finally {
+      manager.dispose();
+    }
+  });
+
   it("top-level spawns default to background, nested spawns to foreground", async () => {
     const { resolveAgentInvocationConfig } = await import("../src/invocation-config.js");
     // The setting's default (true) is what index.ts passes for top-level calls.

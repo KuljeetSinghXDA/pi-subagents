@@ -53,6 +53,7 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  getCurrentSystemPrompt,
   getCurrentTools,
   type Model,
   type ToolCall,
@@ -211,12 +212,28 @@ function resolveReply(
 }
 
 /**
+ * Whether a faux call comes from a subagent session rather than the main one.
+ * Keyed on the `<active_agent name="…"/>` tag every subagent system prompt
+ * carries (`buildAgentPrompt`). Not on the `Agent` tool: `general-purpose`
+ * children have it too, since they may delegate.
+ *
+ * A bare continuation (a paused child resumed with /continue) can reach the
+ * provider with its system message emptied, so fall back to the session's
+ * tools: ask_parent is injected into every non-isolated subagent and never
+ * into the main session.
+ */
+export function isSubagentContext(context: Context): boolean {
+  if (getCurrentSystemPrompt(context.messages).includes("<active_agent name=")) return true;
+  return getCurrentTools(context.messages).some((tool) => tool.name === "ask_parent");
+}
+
+/**
  * The common single-spawn flow as a responder. Routes by inspecting the calling
  * session's own context:
- *   - PARENT  (its tool set includes `Agent`):
+ *   - PARENT  (the main session):
  *       · `parentInitial` until an `Agent` tool result is in history (the spawn),
  *       · then `parentFinal` (the answer after the child reports back).
- *   - SUBAGENT (no `Agent` tool): `subagent`.
+ *   - SUBAGENT (`isSubagentContext`): `subagent`.
  * Each route may be a value or a `(ctx) => value` function.
  */
 export function routeBySession(routes: {
@@ -225,8 +242,7 @@ export function routeBySession(routes: {
   subagent: FauxReply | ((ctx: Context) => FauxReply);
 }): FauxResponder {
   return (context) => {
-    const isParent = getCurrentTools(context.messages).some((t) => t.name === "Agent");
-    if (!isParent) return resolveReply(routes.subagent, context);
+    if (isSubagentContext(context)) return resolveReply(routes.subagent, context);
     const spawned = context.messages.some(
       (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
     );

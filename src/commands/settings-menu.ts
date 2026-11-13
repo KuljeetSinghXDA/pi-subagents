@@ -103,6 +103,7 @@ function snapshotSettings(deps: SettingsMenuDeps) {
   return {
     maxConcurrent: deps.manager.getMaxConcurrent(),
     maxConcurrentForeground: deps.manager.getMaxConcurrentForeground(),
+    maxConcurrentNested: deps.manager.getMaxConcurrentNested(),
     defaultMaxTurns: getDefaultMaxTurns() ?? 0,
     graceTurns: getGraceTurns(),
     defaultJoinMode: deps.getDefaultJoinMode(),
@@ -164,8 +165,22 @@ function notifyApplied(
 }
 
 const NUMERIC_IDS = new Set([
-  "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+  "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
 ]);
+
+/**
+ * The row `SettingsList` would act on. The list keeps its cursor private, and
+ * its filter rewrites the rows under it: applying a query resets
+ * `selectedIndex` to 0, so an index tracked outside the list goes stale as soon
+ * as the user types. Read the list's own pair instead.
+ */
+function selectedSetting(list: SettingsList): SettingItem | undefined {
+  const state = list as unknown as {
+    selectedIndex?: number;
+    filteredItems?: SettingItem[];
+  };
+  return state.filteredItems?.[state.selectedIndex ?? 0];
+}
 
 export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsMenuDeps): Promise<void> {
   const {
@@ -204,6 +219,7 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
   function buildItems(): SettingItem[] {
     const mc = manager.getMaxConcurrent();
     const mcf = manager.getMaxConcurrentForeground();
+    const mcn = manager.getMaxConcurrentNested();
     const dmt = getDefaultMaxTurns() ?? 0;
     const gt = getGraceTurns();
     const msd = getMaxSubagentDepth();
@@ -213,17 +229,31 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
     return [
       {
         id: "maxConcurrent",
-        label: "Max concurrency",
-        description: "Max concurrent background agents (Enter to type)",
+        label: "Max background concurrency",
+        description: "Max concurrent background agents; extras wait in a queue (Enter to type)",
         currentValue: String(mc),
         values: [String(mc)],
       },
       {
         id: "maxConcurrentForeground",
         label: "Max foreground concurrency",
-        description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+        description: "Max concurrent foreground (blocking) agents; extras wait in a queue (0 = unlimited, Enter to type)",
         currentValue: String(mcf),
         values: [String(mcf)],
+      },
+      {
+        id: "maxConcurrentNested",
+        label: "Max nested concurrency",
+        description: "Max concurrent nested agents (started by subagents); extras are refused (0 = unlimited, Enter to type)",
+        currentValue: String(mcn),
+        values: [String(mcn)],
+      },
+      {
+        id: "maxSubagentDepth",
+        label: "Nested depth",
+        description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, even with allowed_subagents; Enter to type)",
+        currentValue: String(msd),
+        values: [String(msd)],
       },
       {
         id: "defaultMaxTurns",
@@ -238,13 +268,6 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         description: "Grace turns after wrap-up steer (Enter to type)",
         currentValue: String(gt),
         values: [String(gt)],
-      },
-      {
-        id: "maxSubagentDepth",
-        label: "Nested depth",
-        description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-        currentValue: String(msd),
-        values: [String(msd)],
       },
       {
         id: "joinMode",
@@ -361,7 +384,7 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         id: "showModel",
         label: "Show model",
         description:
-          "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
+          "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows and the fleet view rows. The Agent tool result and the conversation viewer show the pair either way — this adds it where the rows are already dense.",
         currentValue: isShowModelEnabled() ? "on" : "off",
         values: ["on", "off"],
       },
@@ -416,7 +439,7 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
       const n = parseInt(value, 10);
       if (n >= 1) {
         manager.setMaxConcurrent(n);
-        notifyApplied(ctx, `Max concurrency set to ${n}`, deps);
+        notifyApplied(ctx, `Max background concurrency set to ${n}`, deps);
       }
     } else if (id === "maxConcurrentForeground") {
       const n = parseInt(value, 10);
@@ -425,6 +448,14 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         notifyApplied(ctx, n === 0
           ? "Max foreground concurrency set to unlimited"
           : `Max foreground concurrency set to ${n}`, deps);
+      }
+    } else if (id === "maxConcurrentNested") {
+      const n = parseInt(value, 10);
+      if (n >= 0) {
+        manager.setMaxConcurrentNested(n);
+        notifyApplied(ctx, n === 0
+          ? "Max nested concurrency set to unlimited"
+          : `Max nested concurrency set to ${n}`, deps);
       }
     } else if (id === "defaultMaxTurns") {
       const n = parseInt(value, 10);
@@ -448,7 +479,7 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         notifyApplied(
           ctx,
           n <= 1
-            ? "Nested delegation disabled"
+            ? "Nested delegation disabled for every agent, including those with allowed_subagents"
             : `Nested depth set to ${n}. Applies to agents started from now on.`,
           deps,
         );
@@ -587,7 +618,6 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
   }
 
   let list: SettingsList;
-  let currentIndex = 0;
 
   const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
     const items = buildItems();
@@ -600,6 +630,7 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
         applyValue(id, newValue);
       },
       () => done(undefined as undefined),
+      { enableSearch: true },
     );
 
     const container = new Container();
@@ -611,14 +642,9 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
       render: (w: number) => container.render(w),
       invalidate: () => container.invalidate(),
       handleInput: (data: string) => {
-        if (matchesKey(data, "up")) {
-          currentIndex = Math.max(0, currentIndex - 1);
-        } else if (matchesKey(data, "down")) {
-          currentIndex = Math.min(items.length - 1, currentIndex + 1);
-        }
-
-        if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
-          done(items[currentIndex].id);
+        const selected = selectedSetting(list);
+        if (matchesKey(data, Key.enter) && selected && NUMERIC_IDS.has(selected.id)) {
+          done(selected.id);
           return;
         }
         list.handleInput?.(data);
@@ -631,21 +657,25 @@ export async function showSettings(ctx: ExtensionCommandContext, deps: SettingsM
       ? String(manager.getMaxConcurrent())
       : result === "maxConcurrentForeground"
         ? String(manager.getMaxConcurrentForeground())
-        : result === "defaultMaxTurns"
-          ? String(getDefaultMaxTurns() ?? 0)
-          : result === "maxSubagentDepth"
-            ? String(getMaxSubagentDepth())
-            : String(getGraceTurns());
+        : result === "maxConcurrentNested"
+          ? String(manager.getMaxConcurrentNested())
+          : result === "defaultMaxTurns"
+            ? String(getDefaultMaxTurns() ?? 0)
+            : result === "maxSubagentDepth"
+              ? String(getMaxSubagentDepth())
+              : String(getGraceTurns());
 
     const label = result === "maxConcurrent"
-      ? "Max concurrency (1+)"
+      ? "Max background concurrency (1+)"
       : result === "maxConcurrentForeground"
         ? "Max foreground concurrency (0 = unlimited)"
-        : result === "defaultMaxTurns"
-          ? "Default max turns (0 = unlimited)"
-          : result === "maxSubagentDepth"
-            ? "Nested depth (0/1 = nesting off)"
-            : "Grace turns (1+)";
+        : result === "maxConcurrentNested"
+          ? "Max nested concurrency (0 = unlimited)"
+          : result === "defaultMaxTurns"
+            ? "Default max turns (0 = unlimited)"
+            : result === "maxSubagentDepth"
+              ? "Nested depth (0/1 = nesting off)"
+              : "Grace turns (1+)";
 
     let input: string | undefined = await ctx.ui.input(label, current);
     while (input != null) {

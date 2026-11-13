@@ -239,6 +239,54 @@ describe("formatCost", () => {
   });
 });
 
+describe("AgentWidget model display", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const tui = { terminal: { columns: 200, rows: 40 } };
+
+  function renderLines(over: Record<string, unknown> = {}, showModel = true): string {
+    const record = {
+      id: "bg",
+      type: "general-purpose",
+      description: "background",
+      status: "running",
+      toolUses: 0,
+      startedAt: Date.now(),
+      lifetimeUsage: { input: 100, output: 0, cacheWrite: 0 },
+      ownUsage: { input: 100, output: 0, cacheWrite: 0 },
+      invocation: { modelName: "sonnet 4.6", thinking: "high" },
+      ...over,
+    };
+    const manager = { listAgents: () => [record] };
+    const widget = new AgentWidget(
+      manager as any,
+      new Map(),
+      () => false,
+      () => showModel,
+      () => "pi",
+    );
+    return widget.renderWidget(tui, theme).join("\n");
+  }
+
+  it("names the model and thinking on a running row under showModel", () => {
+    const on = renderLines();
+    // Bare level, not "thinking: high" — the label is dropped on this surface.
+    expect(on).toContain("sonnet 4.6 · high");
+    expect(on).not.toContain("thinking:");
+  });
+
+  it("renders the row without model or level when showModel is off", () => {
+    const off = renderLines({}, false);
+    expect(off).not.toContain("sonnet 4.6");
+    expect(off).not.toContain("high");
+  });
+
+  it("keeps the (asked X) annotation on both values", () => {
+    const out = renderLines({ invocation: { modelName: "haiku 4.5", thinking: "high", requestedThinking: "max" } });
+    // Label stripped, but the "(asked max)" annotation survives the strip.
+    expect(out).toContain("haiku 4.5 · high (asked max)");
+  });
+});
+
 describe("AgentWidget status bar", () => {
   const theme = {
     fg: (c: string, s: string) => `<${c}>${s}</${c}>`,

@@ -127,6 +127,7 @@ function makeRunningAgent(): AgentRecord {
     startedAt: Date.now(),
     session: { subscribe: () => () => {}, messages: [] },
     lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 },
+    ownUsage: { input: 13100, output: 0, cacheWrite: 0 },
     compactionCount: 0,
   } as unknown as AgentRecord;
 }

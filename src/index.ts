@@ -188,9 +188,10 @@ export default function (pi: ExtensionAPI) {
   function isShowCostEnabled(): boolean { return showCost; }
   function setShowCost(b: boolean): void { showCost = b; widget.update(); fleet.update(); }
 
+  /** Name the model and thinking level on the widget's running rows and the fleet rows. */
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
 
   const pendingUsage = new PendingUsagePool();
   const park = new ParkGateController();
@@ -330,6 +331,7 @@ export default function (pi: ExtensionAPI) {
     handoff.backgroundActionFor,
     getUIStyle,
     getViewerStyle,
+    isShowModelEnabled,
   );
 
   fleet.setLifecycleActions({
@@ -409,6 +411,7 @@ export default function (pi: ExtensionAPI) {
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
+      setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,

@@ -11,11 +11,11 @@
  * 6. Resuming by the generated name (`resume: "<name>"`) successfully resolves and continues the session.
  */
 import { rmSync } from "node:fs";
-import { getCurrentTools } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentCall,
   agentToolResults,
+  isSubagentContext,
   type PrintModeRun,
   routeBySession,
   runPrintMode,
@@ -118,7 +118,7 @@ describe.skipIf(LIVE)("agent auto-naming and resume e2e", () => {
     run = await runPrintMode({
       prompt: "Spawn then resume by generated name.",
       respond: (context) => {
-        const isParent = getCurrentTools(context.messages).some((t) => t.name === "Agent");
+        const isParent = !isSubagentContext(context);
         if (!isParent) {
           // Subagent answers
           return "SUBAGENT_TURN_PROCESSED";
@@ -171,7 +171,7 @@ describe.skipIf(LIVE)("agent auto-naming and resume e2e", () => {
     run = await runPrintMode({
       prompt: "Spawn two unnamed agents.",
       respond: (context) => {
-        const isParent = getCurrentTools(context.messages).some((t) => t.name === "Agent");
+        const isParent = !isSubagentContext(context);
         if (!isParent) return "CHILD_DONE";
 
         const agentResults = context.messages.filter(

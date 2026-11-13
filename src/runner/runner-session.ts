@@ -100,6 +100,12 @@ interface PreparedSystemPrompt {
   systemPrompt: string;
   toolNames: string[];
   noSkills: boolean;
+  nested: PreparedNestedTools;
+}
+
+interface PreparedNestedTools {
+  tools: ReturnType<typeof createNestedSubagentTools>;
+  disallowedSet: Set<string> | undefined;
 }
 
 /**
@@ -128,6 +134,45 @@ async function prepareAgentSystemPrompt(
 
   const isolated = agentConfig?.isolated ?? options.isolated;
   const skills = isolated ? false : config.skills;
+
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
+
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents` and a nestedRuntime was provided — and never when
+  // isolated. Decided before the prompt is built, which says so when the agent
+  // delegates.
+  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than three tools whose
+  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  // A workflow agent running the built-in general-purpose (what an untyped
+  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // Agent tool, and the workflow script is what fans out. A custom agent's own
+  // `allowed_subagents` still applies.
+  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
+    ? createNestedSubagentTools({
+        manager: nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  // Only where the built-in general-purpose can actually spawn — not in a
+  // workflow, at the depth cap, isolated, or with `Agent` disallowed.
+  if (agentConfig?.isDefault && nestedToolNames.has("Agent") && !disallowedSet?.has("Agent")) {
+    extras.delegationGuideline = true;
+  }
 
   if (Array.isArray(skills)) {
     const loaded = preloadSkills(skills, configCwd);
@@ -165,7 +210,7 @@ async function prepareAgentSystemPrompt(
   }
 
   const noSkills = skills === false || Array.isArray(skills);
-  return { systemPrompt, toolNames, noSkills };
+  return { systemPrompt, toolNames, noSkills, nested: { tools: nestedTools, disallowedSet } };
 }
 
 interface RunnerResourceContext {
@@ -361,7 +406,7 @@ function buildSessionToolLoadout(
   extNames: Set<string>,
   mcpToolPatterns: string[] | undefined,
   noExtensions: boolean,
-  configCwd: string,
+  nested: PreparedNestedTools,
   options: RunOptions,
 ): SessionToolLoadout {
   const isolated = agentConfig?.isolated ?? options.isolated;
@@ -390,25 +435,7 @@ function buildSessionToolLoadout(
 
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
 
-  const disallowedSet: Set<string> | undefined = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
-
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
-    ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
-        pi: options.pi,
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
-        configCwd,
-      })
-    : [];
+  const { disallowedSet, tools: nestedTools } = nested;
 
   const askTools = options.nestedRuntime && !isolated && !nestedTools.some((tool: any) => tool.name === "ask_parent")
     ? createAskAnswerTools({
@@ -1583,9 +1610,10 @@ export async function runAgent(
   const config = getConfig(type);
 
   // 1. Prepare agent system prompt, memory, and skills
-  const { systemPrompt, toolNames, noSkills } = await prepareAgentSystemPrompt(
+  const prepared = await prepareAgentSystemPrompt(
     ctx, type, agentConfig, config, effectiveCwd, configCwd, options,
   );
+  const { systemPrompt, toolNames, noSkills } = prepared;
 
   // 2. Setup resource loader, extension overrides, and configuration warnings
   const resourceContext = await createRunnerResourceLoader(
@@ -1596,7 +1624,7 @@ export async function runAgent(
   const toolLoadout = buildSessionToolLoadout(
     ctx, type, agentConfig, resourceContext.loader, resourceContext.sessionSettingsManager,
     toolNames, resourceContext.extNames, resourceContext.mcpToolPatterns, resourceContext.noExtensions,
-    configCwd, options,
+    prepared.nested, options,
   );
 
   // 4. Instantiate session, bind extensions (including MCP), and build durable registry

@@ -620,6 +620,83 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeDefined();
   });
+
+  // Only the owner can read a nested child's result, so once the owner is gone
+  // an unread child has no reader left to be spared for.
+  it("clearCompleted(true) removes unread nested descendants along with their removed parent", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    const grandchildId = manager.spawn(mockPi, mockCtx, "scout", "grandchild", {
+      description: "grandchild",
+      isBackground: true,
+      depth: 3,
+      parentAgentId: childId,
+    });
+    await Promise.all([parentId, childId, grandchildId].map(id => manager.getRecord(id)!.promise));
+    manager.getRecord(parentId)!.resultConsumed = true;
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeUndefined();
+    expect(manager.getRecord(childId)).toBeUndefined();
+    expect(manager.getRecord(grandchildId)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) keeps an unread nested child while its parent stays", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    await Promise.all([parentId, childId].map(id => manager.getRecord(id)!.promise));
+
+    // The parent is unread too, so it is spared — and can still collect its child.
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeDefined();
+    expect(manager.getRecord(childId)).toBeDefined();
+  });
+
+  it("clearCompleted(true) keeps a paused nested child when its parent is removed", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    await Promise.all([parentId, childId].map(id => manager.getRecord(id)!.promise));
+    manager.getRecord(parentId)!.resultConsumed = true;
+    // A parked run is revived by /continue, so it is not an orphan to sweep.
+    manager.getRecord(childId)!.status = "paused";
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeUndefined();
+    expect(manager.getRecord(childId)).toBeDefined();
+  });
 });
 
 // The manager-level usage hook is the ONE place every assistant message is seen
@@ -687,6 +764,10 @@ describe("AgentManager — the usage hook fires once per assistant message", () 
     // records would bill this session for two messages when one was sent. The
     // double-booking stays — it is what makes a hidden child visible.
     expect(manager.getRecord(parentId)!.lifetimeUsage).toEqual({ input: 20, output: 10, cacheWrite: 0, cost: 0.002 });
+    // `ownUsage` is the figure that is not double-booked: the parent keeps only
+    // its own message, the child only its own — what the fleet list shows.
+    expect(manager.getRecord(parentId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+    expect(manager.getRecord(childId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
   });
 });
 
@@ -711,6 +792,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     const record = manager.getRecord(id)!;
 
     expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
+    expect(record.ownUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
     expect(record.compactionCount).toBe(0);
 
     manager.abort(id);
@@ -803,6 +885,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     await manager.resume(id, "more");
 
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
 
@@ -2523,6 +2606,7 @@ describe("AgentManager — background resume", () => {
     // Internal record bookkeeping still runs alongside the forwarded callbacks.
     expect(manager.getRecord(id)!.toolUses).toBe(1);
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
   });
 
   it("does not count probe warnings as tool uses", async () => {
@@ -3100,6 +3184,11 @@ describe("AgentManager — questions and nested resume spend", () => {
 
     for (const id of [child.id, middleId, topId]) {
       expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+    }
+    // Only the child ran the turn: the ancestors' own figures stay untouched.
+    expect(manager.getRecord(child.id)!.ownUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+    for (const id of [middleId, topId]) {
+      expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
     }
     middleRun.resolve(outcome());
     await manager.getRecord(middleId)!.promise;

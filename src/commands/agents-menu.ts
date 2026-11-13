@@ -21,6 +21,7 @@ import { packageNameForPath } from "../package-resources.js";
 import type { SubagentScheduler } from "../schedule.js";
 import { getModelLabelFromConfig } from "../tools/agent-tool-schema.js";
 import type { AgentConfig, AgentRecord, AgentTombstone } from "../types.js";
+import { agentTree } from "../ui/agent-tree.js";
 import { formatDuration, getDisplayName } from "../ui/agent-widget.js";
 import type { FleetList } from "../ui/fleet-list.js";
 import { showSchedulesMenu } from "../ui/schedule-menu.js";
@@ -231,39 +232,44 @@ export async function showAgentsMenu(ctx: ExtensionCommandContext, deps: AgentsM
   reloadCustomAgents();
   const allNames = getAllTypes();
 
-  const options: string[] = [];
+  // Each row pairs the label the user sees with the value the menu dispatches
+  // on. Labels carry live counts, so they are not stable enough to branch on.
+  const items: { value: string; label: string }[] = [];
+  // The reachable list includes nested children, but the bulk pause/resume
+  // actions below stay top-level: a child is managed by its parent.
+  const roster = runningAgentsRoster(manager).map(row => row.record);
   const agents = manager.listAgents().filter(isTopLevelAgent);
-  const active = agents.filter(a => a.status === "running" || a.status === "queued").length;
-  if (agents.length > 0) {
-    const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
-    options.push(`Running agents (${agents.length}) — ${active} running, ${done} done`);
+  const active = roster.filter(a => a.status === "running" || a.status === "queued").length;
+  if (roster.length > 0) {
+    const done = roster.filter(a => a.status === "completed" || a.status === "steered").length;
+    items.push({ value: "running", label: `Running agents (${roster.length}) — ${active} running, ${done} done` });
   }
 
+  const topLevelActive = agents.filter(a => a.status === "running" || a.status === "queued").length;
   const pausedCount = agents.filter(a => a.status === "paused").length;
-  if (active > 0) options.push(`Pause active agents (${active})`);
-  if (pausedCount > 0) options.push(`Resume paused agents (${pausedCount})`);
+  if (topLevelActive > 0) items.push({ value: "pause", label: `Pause active agents (${topLevelActive})` });
+  if (pausedCount > 0) items.push({ value: "resume", label: `Resume paused agents (${pausedCount})` });
   const evicted = manager.listTombstones().length;
-  if (evicted > 0) options.push(`Revive evicted agents (${evicted})`);
+  if (evicted > 0) items.push({ value: "revive", label: `Revive evicted agents (${evicted})` });
 
-  if (agents.length > 0 || fleet.hasRows()) {
-    options.push("Agent hub (roster)");
+  if (roster.length > 0 || fleet.hasRows()) {
+    items.push({ value: "hub", label: "Agent hub (roster)" });
   }
 
   if (allNames.length > 0) {
-    options.push(`Agent types (${allNames.length})`);
+    items.push({ value: "types", label: `Agent types (${allNames.length})` });
   }
 
   if (scheduler.isActive()) {
-    const jobCount = scheduler.list().length;
-    options.push(`Scheduled jobs (${jobCount})`);
+    items.push({ value: "schedules", label: `Scheduled jobs (${scheduler.list().length})` });
   }
 
   if (isWorkflowsEnabled()) {
-    options.push(`Workflows (${workflowTasks.size})`);
+    items.push({ value: "workflows", label: `Workflows (${workflowTasks.size})` });
   }
 
-  options.push("Create new agent");
-  options.push("Settings");
+  items.push({ value: "create", label: "Create new agent" });
+  items.push({ value: "settings", label: "Settings" });
 
   const noAgentsMsg = allNames.length === 0 && agents.length === 0
     ? "No agents found. Create specialized subagents that can be delegated to.\n\n" +
@@ -275,22 +281,23 @@ export async function showAgentsMenu(ctx: ExtensionCommandContext, deps: AgentsM
     ctx.ui.notify(noAgentsMsg, "info");
   }
 
-  const choice = await ctx.ui.select("Agents", options);
+  const label = await ctx.ui.select("Agents", items.map(item => item.label));
+  const choice = items.find(item => item.label === label)?.value;
   if (!choice) return;
 
-  if (choice.startsWith("Running agents (")) {
+  if (choice === "running") {
     await showRunningAgents(ctx, deps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice.startsWith("Pause active agents")) {
+  } else if (choice === "pause") {
     await pauseAgentsCommand(ctx, undefined, pauseDeps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice.startsWith("Resume paused agents")) {
+  } else if (choice === "resume") {
     await resumeAgentsCommand(ctx, undefined, pauseDeps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice.startsWith("Revive evicted agents")) {
+  } else if (choice === "revive") {
     await reviveAgentsCommand(ctx, undefined, pauseDeps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice === "Agent hub (roster)") {
+  } else if (choice === "hub") {
     try {
       await fleet.openHub();
     } catch (err) {
@@ -299,18 +306,18 @@ export async function showAgentsMenu(ctx: ExtensionCommandContext, deps: AgentsM
         "error",
       );
     }
-  } else if (choice.startsWith("Agent types (")) {
+  } else if (choice === "types") {
     await showAllAgentsList(ctx, deps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice.startsWith("Scheduled jobs (")) {
+  } else if (choice === "schedules") {
     await showSchedulesMenu(ctx, scheduler);
     await showAgentsMenu(ctx, deps);
-  } else if (choice.startsWith("Workflows (")) {
+  } else if (choice === "workflows") {
     await showWorkflowsMenu(ctx, workflowMenuDeps);
     await showAgentsMenu(ctx, deps);
-  } else if (choice === "Create new agent") {
+  } else if (choice === "create") {
     await showCreateWizard(ctx, { pi: deps.pi, manager, reloadCustomAgents });
-  } else if (choice === "Settings") {
+  } else if (choice === "settings") {
     await showSettings(ctx);
     await showAgentsMenu(ctx, deps);
   }
@@ -365,21 +372,31 @@ export async function showAllAgentsList(ctx: ExtensionCommandContext, deps: Agen
   }
 }
 
+/**
+ * The session's agents plus their nested children, as a tree (newest
+ * top-level first). Nested children are listed here as in FleetView: this
+ * list keeps finished agents until eviction, so it is where a finished child
+ * stays reachable. Workflow agents stay in the workflow inspector.
+ */
+function runningAgentsRoster(manager: AgentManager) {
+  return agentTree(manager.listAgents().filter(a => a.workflowId === undefined));
+}
+
 export async function showRunningAgents(ctx: ExtensionCommandContext, deps: AgentsMenuDeps) {
-  const agents = deps.manager.listAgents().filter(isTopLevelAgent);
-  if (agents.length === 0) {
+  const rows = runningAgentsRoster(deps.manager);
+  if (rows.length === 0) {
     ctx.ui.notify("No agents.", "info");
     return;
   }
 
-  const record = await selectItem(ctx.ui, "Running agents", agents, a => {
+  const row = await selectItem(ctx.ui, "Running agents", rows, ({ record: a, prefix }) => {
     const dn = getDisplayName(a.type);
     const dur = formatDuration(a.startedAt, a.completedAt);
-    return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+    return `${prefix}${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
   });
-  if (!record) return;
+  if (!row) return;
 
-  await viewAgentConversation(ctx, record, deps.fleet);
+  await viewAgentConversation(ctx, row.record, deps.fleet);
   await showRunningAgents(ctx, deps);
 }
 

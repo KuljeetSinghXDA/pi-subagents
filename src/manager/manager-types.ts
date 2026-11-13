@@ -33,6 +33,13 @@ export const DEFAULT_MAX_CONCURRENT = 10;
 /** Default max concurrent foreground (blocking) agents — 0 = unlimited. */
 export const DEFAULT_MAX_CONCURRENT_FOREGROUND = 0;
 
+/**
+ * Default cap on running nested children outside workflows. Added to a full
+ * background pool (`DEFAULT_MAX_CONCURRENT`) it gives 20, Claude Code's default
+ * for `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`.
+ */
+export const DEFAULT_MAX_CONCURRENT_NESTED = 10;
+
 /** How many evicted agents stay addressable by name. */
 export const MAX_TOMBSTONES = 100;
 
