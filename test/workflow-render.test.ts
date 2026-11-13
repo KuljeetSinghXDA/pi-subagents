@@ -286,6 +286,23 @@ describe("stat segments", () => {
     expect(rows[1].trimEnd()).toBe("  └─ ✔ review:bugs · Explore · haiku · 18.4k · 12 tool calls · 42s");
   });
 
+  it("renders a running row's live counters from its entry, counted once (#453)", () => {
+    // The runtime rewrites the row's `tokens`/`toolCalls` from the host's live
+    // reports while the child works, so a running row carries the same stats a
+    // settled one does — and carries each of them exactly once.
+    const rows = treeRows(
+      card({
+        progress: [
+          agentEntry({ index: 0, label: "audit", state: "progress", startedAt: START, tokens: 18_400, toolCalls: 12 }),
+        ],
+      }),
+    );
+    const row = rows[1].trimEnd();
+    expect(row).toBe("  └─ ⟳ audit · 18.4k · 12 tool calls");
+    expect(row.split("18.4k")).toHaveLength(2);
+    expect(row.split("12 tool calls")).toHaveLength(2);
+  });
+
   it("aligns stats into one column across groups", () => {
     const lines = card({
       progress: [

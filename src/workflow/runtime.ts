@@ -31,6 +31,7 @@ import {
   type WorkflowRunResult,
   type WorkflowScriptRef,
   type WorkflowScriptSource,
+  type WorkflowSpawnRequest,
   type WorkflowSpawnResult,
   workflowConcurrency,
 } from "./runtime-types.js";
@@ -489,12 +490,32 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
           const startedAt = Date.now();
           emit([{ ...base, queuedAt, startedAt, ...attemptMark }]);
+          // One row covers every attempt, so a live snapshot is reconciled
+          // against the earlier attempts' settled totals — not against the last
+          // snapshot — or completion would count the same spend twice.
+          const tokensBefore = tokens;
+          const toolCallsBefore = toolCalls;
+          let acceptingProgress = true;
+          const onProgress: NonNullable<WorkflowSpawnRequest["onProgress"]> = info => {
+            // The runtime id is reused by retries and resumes; an inflight
+            // callback alone would let an older attempt overwrite the current
+            // row or revive one that already settled.
+            if (!acceptingProgress || settled) return;
+            if (info.tokens !== undefined) base.tokens = tokensBefore + info.tokens;
+            if (info.toolCalls !== undefined) base.toolCalls = toolCallsBefore + info.toolCalls;
+            // To the listener only, not `emit`: a report arrives on every
+            // finished tool and message, and logging each would grow `progress`
+            // by one entry. The settled entry carries the final counters.
+            options.onProgress?.([
+              { ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() },
+            ]);
+          };
 
           // Mutates `base` rather than emitting a standalone patch: every later
           // emit spreads it, so the settle path carries the effective values
           // without knowing they were ever corrected. Re-emitting under the
-          // same `index` is what the append-only, last-write-wins progress log
-          // is for — the row updates in place while the agent is still running.
+          // same `index` is what the last-write-wins progress log is for — the
+          // row updates in place while the agent is still running.
           const onResolved = (info: {
             recordId?: string;
             modelName?: string;
@@ -514,7 +535,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             // Not reachable from this repo's host, which reports during startup
             // — but this is the host boundary, and every other promise it makes
             // is checked rather than trusted.
-            if (!inflight.has(agentId)) return;
+            if (!acceptingProgress || settled) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
           live.started = true;
@@ -526,7 +547,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
-                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved)
+                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved, onProgress)
                 : await host.spawnAgent({
                     agentId,
                     index,
@@ -543,6 +564,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    onProgress,
                   });
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
@@ -574,6 +596,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           } catch (error) {
             result = { ...result, ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
+            acceptingProgress = false;
             inflight.delete(agentId);
             live.started = false;
             semaphore.release();

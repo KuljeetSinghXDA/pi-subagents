@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — a workflow starts only when the user asks for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
+
 > **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
 
 > **⚠️ Behavior change — the built-in `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). Its children count toward `maxConcurrentNested`, and depth stays at `maxSubagentDepth` `2`, so a subagent's children cannot spawn again. Inside a workflow it does not delegate, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` without `allowed_subagents`; an earlier ejected copy already behaves that way. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
@@ -35,6 +37,8 @@ check the entries below for behaviour changes.
 
 ### Fixed
 
+- **Asking for a number of subagents no longer starts a workflow** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A pi-only `SubagentWorkflow` guideline sent requests like "use 10 agents to …" to a workflow instead of parallel `Agent` calls, overriding the tool description's rule that a workflow needs an explicit opt-in. The guideline is removed, as Claude Code has none; "use a workflow" or a saved workflow name still starts one.
+
 - **Schedule-store lock contention fails fast instead of blocking the event loop** (ported from [tintinweb/pi-subagents#266](https://github.com/tintinweb/pi-subagents/issues/266)). A lock left by the same PID or a dead process is reclaimed; a lock held by a live foreign process, an empty/garbage lock, or an unreadable lock throws immediately instead of busy-waiting for roughly five seconds, and an unreadable lock is never unlinked. Fire-time persistence failures emit a `subagents:scheduled` error event through `SubagentScheduler.persist` instead of throwing out of a timer tick or rejecting at completion.
 
 - **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through the injected keybindings the way its scroll and expand keys already did. Remapping those actions no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the rest of pi uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
@@ -54,6 +58,8 @@ check the entries below for behaviour changes.
 - **Finished nested subagents no longer outlive their parent across a session switch.** On `/new` or a session switch, finished agents whose result was never read stay in memory. A nested child's result is only ever read by its parent, so nothing marked it read: it stayed in memory with its session still loaded after its parent was gone. It is now removed along with its parent; running, queued, and paused children stay.
 
 - **`get_subagent_result` says when a saved result is from** ([#436](https://github.com/tintinweb/pi-subagents/issues/436) — thanks [@EndUser123](https://github.com/EndUser123)). Once the live record is gone, the answer comes from the session's saved record, which lasts as long as the session, so a days-old result read as current. That answer now carries a `Finished:` line with the time and age (`2026-11-10T14:14Z (2d ago)`). It matters most for handles: after a reload, `explore` resolves to the most recent saved run, however old.
+
+- **Workflow rows show their token and tool-call counts while the child is still running** (ported from [tintinweb/pi-subagents#453](https://github.com/tintinweb/pi-subagents/pull/453)). The host forwards the child's live counters to its progress row — tool calls as each one completes, tokens when an assistant message ends — instead of waiting for the agent to settle. A resumed row counts only its continuation and a retried row keeps the earlier attempt's spend; live reports stay out of the run's transition log, so `result.progress` is unchanged, and the task keeps one entry per agent rather than one per report.
 
 ## [2026.11.091] - 2026-11-09
 

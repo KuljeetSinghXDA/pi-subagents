@@ -538,8 +538,78 @@ describe("createWorkflowHost — abort, resume and gate", () => {
     await host.spawnAgent(request({ agentId: "wf-agent-0" }));
     const resumed = await host.resumeAgent?.("wf-agent-0", "and now this");
 
-    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined);
+    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined, {
+      onAssistantUsage: expect.any(Function),
+      onToolActivity: expect.any(Function),
+    });
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+  });
+
+  describe("live counters (#453)", () => {
+    /**
+     * A manager whose one child keeps a live record while it runs: `during`
+     * mutates it and fires the manager's hooks, as `runAgent` would, before the
+     * spawn settles. `resume` does the same for the continuation.
+     */
+    function liveManager(during: (child: AgentRecord, options: any) => void) {
+      const child = record({ id: "child-1" });
+      const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _t: string, _p: string, options: any, onSpawned?: (id: string) => void) => {
+        onSpawned?.(child.id);
+        during(child, options);
+        return { id: child.id, record: child };
+      });
+      const resume = vi.fn(async (_id: string, _prompt: string, _signal: unknown, options: any) => {
+        during(child, options);
+        return child;
+      });
+      const getRecord = (id: string) => (id === child.id ? child : undefined);
+      return { spawnAndWait, resume, getRecord, abort: vi.fn() } as unknown as AgentManager;
+    }
+
+    it("reports a running child's completed tools and finalized usage before it settles", async () => {
+      const snapshots: unknown[] = [];
+      const manager = liveManager((child, options) => {
+        options.onToolActivity({ type: "start", toolName: "read" });
+        child.toolUses = 1;
+        options.onToolActivity({ type: "end", toolName: "read" });
+        child.lifetimeUsage = { input: 100, output: 20, cacheWrite: 0 };
+        options.onAssistantUsage({ input: 100, output: 20, cacheWrite: 0 });
+      });
+      const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager });
+
+      const result = await host.spawnAgent(request({ onProgress: info => snapshots.push(info) }));
+
+      // A tool start is not a completed tool call, so it reports nothing.
+      expect(snapshots).toEqual([
+        { tokens: 0, outputTokens: 0, toolCalls: 0 },
+        { tokens: 0, outputTokens: 0, toolCalls: 1 },
+        { tokens: 120, outputTokens: 20, toolCalls: 1 },
+      ]);
+      expect(result).toMatchObject({ tokens: 120, outputTokens: 20, toolCalls: 1 });
+    });
+
+    it("counts only the continuation on a resumed row, live and settled", async () => {
+      const snapshots: unknown[] = [];
+      let resuming = false;
+      const manager = liveManager((child, options) => {
+        if (!resuming) {
+          child.toolUses = 4;
+          child.lifetimeUsage = { input: 400, output: 40, cacheWrite: 0 };
+          return;
+        }
+        child.toolUses = 5;
+        child.lifetimeUsage = { input: 430, output: 45, cacheWrite: 0 };
+        options.onAssistantUsage({ input: 30, output: 5, cacheWrite: 0 });
+      });
+      const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager });
+
+      await host.spawnAgent(request({ agentId: "wf-agent-0" }));
+      resuming = true;
+      const resumed = await host.resumeAgent?.("wf-agent-0", "more", undefined, info => snapshots.push(info));
+
+      expect(snapshots).toEqual([{ tokens: 35, outputTokens: 5, toolCalls: 1 }]);
+      expect(resumed).toMatchObject({ tokens: 35, outputTokens: 5, toolCalls: 1 });
+    });
   });
 
   it("refuses to resume an agent the run never spawned", async () => {
@@ -1238,6 +1308,16 @@ describe("workflowsEnabled — the master switch", () => {
     subagentsExtension(booted.pi);
     return booted;
   };
+
+  // Claude Code's Workflow tool carries no guideline choosing it over Agent;
+  // its description's explicit opt-in rule decides. A pi-only line ("Use Agent
+  // for ... a handful you can name up front") routed "use 10 agents to explore
+  // this folder" to SubagentWorkflow instead of 10 parallel Agent calls.
+  it("adds no guideline that picks SubagentWorkflow over Agent", () => {
+    const guidelines: string[] = boot({}).tools.get("SubagentWorkflow").promptGuidelines;
+
+    expect(guidelines.filter((g) => /\bAgent\b|handful|number of agents/i.test(g))).toEqual([]);
+  });
 
   it("is on with no setting at all", () => {
     const booted = boot({});

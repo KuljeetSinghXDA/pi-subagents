@@ -362,19 +362,32 @@ describe("the run's state mark and its item cursor", () => {
 
   it("a running run agent carries its live turn count, tokens and last output line", () => {
     const activity = new Map([["r2", { activeTools: new Map(), toolUses: 2, responseText: "Editing api.ts — route handlers split", turnCount: 3 }]]);
+    // The runtime writes the live counters onto the entry, which is what the
+    // row reads; the record's own lifetime total is a different figure on
+    // purpose, so a re-added record read would show up here (#453).
+    const base = phasedRunSource();
+    const source: WorkflowDialogSource = {
+      ...base,
+      progress: base.progress.map(entry =>
+        entry.type === "workflow_agent" && entry.index === 1 ? { ...entry, tokens: 63_400 } : entry),
+    };
     const h = harness(
       [
         makeRecord({ id: "r1", parentAgentId: "main", description: "schema tables", status: "completed" }),
-        makeRecord({ id: "r2", parentAgentId: "main", description: "api endpoints", status: "running", lifetimeUsage: { input: 60_000, output: 3_400, cacheWrite: 0 } }),
+        makeRecord({ id: "r2", parentAgentId: "main", description: "api endpoints", status: "running", lifetimeUsage: { input: 90_000, output: 9_000, cacheWrite: 0 } }),
       ],
-      { workflows, workflowRun: () => phasedRunSource(), agentActivity: activity },
+      { workflows, workflowRun: () => source, agentActivity: activity },
     );
     h.open();
     h.press(DOWN);
     h.press("\r"); // page W
     const pane = runPane(h.frame());
-    // Live facts on the running row, flush right with the duration…
-    expect(pane).toContain("turn 3 · 63.4k tok");
+    // The entry's live token total, printed once, and the turn count the
+    // record supplies — never the record's own lifetime figure.
+    expect(pane).toContain("turn 3");
+    expect(pane).toContain("63.4k tok");
+    expect(pane.split("63.4k tok")).toHaveLength(2);
+    expect(pane).not.toContain("99.0k");
     // …and the last output line one dim row under it, a `↳` continuation.
     // The done row (m-1) carries neither — no turn count, no tail.
     expect(pane).toContain("↳ Editing api.ts — route handlers split");

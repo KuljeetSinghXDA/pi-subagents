@@ -73,6 +73,8 @@ export interface WorkflowSpawnRequest {
    */
   effort?: string;
   isolation?: "worktree";
+  /** Absolute counters for this spawn/resume invocation, not per-event deltas. */
+  onProgress?(info: Pick<WorkflowSpawnResult, "tokens" | "toolCalls">): void;
   /**
    * Called by the host once the child's EFFECTIVE configuration is known —
    * which is when its session exists, not when the spawn resolves.
@@ -222,6 +224,12 @@ export interface WorkflowHost {
      * the row above it shows the one that ran.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
+    /**
+     * Same reporter {@link WorkflowSpawnRequest.onProgress} carries: a resumed
+     * row is rebuilt from scratch, so without it its counters would only appear
+     * once the continuation had already settled.
+     */
+    onProgress?: WorkflowSpawnRequest["onProgress"],
   ): Promise<WorkflowSpawnResult>;
   /**
    * Run a `gate` command and report whether it passed.
@@ -349,7 +357,11 @@ export interface WorkflowRunResult {
   /** The script's return value, JSON-checked at the boundary. */
   value?: unknown;
   error?: string;
-  /** The append-only log, in emission order. */
+  /**
+   * Every transition, in emission order: one entry each time an agent is
+   * queued, started, resolved or settled. Live counter reports go to
+   * `onProgress` only; the settled entry carries the final counters.
+   */
   progress: WorkflowEntry[];
   /** Agents scheduled, including those that failed. */
   agentCount: number;

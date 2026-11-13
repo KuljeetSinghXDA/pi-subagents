@@ -194,18 +194,23 @@ describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
 
 describe("agentRow — a live row's clock", () => {
   it("derives the duration from the start while the agent runs", () => {
+    // The tokens come off the entry, which the runtime keeps current from the
+    // host's live reports; turns and the tail come from the live record. The
+    // one figure is printed once, never once per source.
     const row = agentRow({
-      entry: entry({ label: "m-2", state: "progress", startedAt: 1_000 }),
+      entry: entry({ label: "m-2", state: "progress", startedAt: 1_000, tokens: 63_400 }),
       selected: false,
       compact: false,
       width: 60,
       glyphs: UNICODE_DIALOG_GLYPHS,
-      workflowActive: true,
+      runStatus: "running",
       spinnerFrame: 0,
       now: 33_000,
-      live: { turns: 2, tokens: 63_400, tail: "editing" },
+      live: { turns: 2, tail: "editing" },
     });
-    expect(row[0].map(s => s.text).join("")).toContain("turn 2 · 63.4k tok · 32s");
+    const head = row[0].map(s => s.text).join("");
+    expect(head).toContain("turn 2 · 32s");
+    expect(head.split("63.4k tok")).toHaveLength(2);
     // The live tail rides the second line as a ↳ continuation.
     expect(row[1].map(s => s.text).join("")).toContain("↳ editing");
   });

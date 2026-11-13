@@ -27,7 +27,7 @@ import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import { buildAgentLogLines } from "../src/ui/hub/hub-log-view.js";
-import { runAgentTail } from "../src/ui/hub/hub-panes.js";
+import { runAgentLive, runAgentTail } from "../src/ui/hub/hub-panes.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { ctx } from "./helpers/boot-extension.js";
@@ -242,5 +242,36 @@ describe("runAgentTail extraction", () => {
       .map((r: any) => (Array.isArray(r) ? r.map((s: any) => s.text).join("") : ""));
     expect(rows.join("\n")).toContain("note   \"summary\": \"all green\"");
     expect(rows.join("\n")).not.toContain("note   }");
+  });
+});
+
+describe("runAgentLive", () => {
+  it("returns turns and the tail only — the token total comes off the entry (#453)", () => {
+    // The row already prints `entry.tokens`, which the runtime keeps current
+    // from the host's live reports. Returning the record's lifetime total here
+    // as well printed the same figure twice, and ignored a resumed row's
+    // baseline once the entries started carrying one.
+    const activity: AgentActivity = {
+      activeTools: new Map(),
+      toolUses: 3,
+      responseText: "working",
+      turnCount: 3,
+    };
+    const record = {
+      id: "a1",
+      lifetimeUsage: { input: 900, output: 40, cacheWrite: 0 },
+      toolUses: 3,
+    };
+    const host = {
+      deps: { manager: { listAgents: () => [record] }, agentActivity: new Map([["a1", activity]]) },
+    };
+    const live = runAgentLive(
+      host as any,
+      { type: "workflow_agent", index: 0, label: "w", state: "start", recordId: "a1", tokens: 12 },
+      "running",
+    );
+
+    expect(live).toEqual({ turns: 3, tail: "working" });
+    expect(Object.keys(live!)).toEqual(["turns", "tail"]);
   });
 });

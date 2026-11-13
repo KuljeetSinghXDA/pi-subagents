@@ -304,7 +304,7 @@ export function agentRow(options: {
   spinnerFrame: number;
   now: number;
   /** Live facts for a running agent with a record: shown on the wide panes. */
-  live?: { turns?: number; tokens?: number; tail?: string };
+  live?: { turns?: number; tail?: string };
 }): WorkflowCardLine[] {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.runStatus);
@@ -327,11 +327,12 @@ export function agentRow(options: {
   }
   // The duration sits flush right, so a column of rows reads as a column of
   // durations rather than as ragged text. A running agent's live turn count
-  // and tokens ride the same right-aligned block.
+  // rides the same right-aligned block; its token total comes off the entry
+  // (`rowStatSegments`), which the runtime keeps current — reading the live
+  // record here as well would print the same figure twice.
   const live = options.live;
   const parts: string[] = [];
   if (live?.turns !== undefined && live.turns > 0) parts.push(`turn ${live.turns}`);
-  if (live?.tokens) parts.push(`${formatCompactTokens(live.tokens)} tok`);
   if (entry.durationMs) parts.push(formatDuration(entry.durationMs));
   else if (live && entry.startedAt != null && options.now > entry.startedAt) {
     // A running agent's clock is still going: settled rows carry durationMs,

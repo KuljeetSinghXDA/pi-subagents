@@ -6,7 +6,6 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentRecordName } from "../../agent-color.js";
 import { extractText } from "../../context.js";
 import type { AgentRecord, UIStyle } from "../../types.js";
-import { getLifetimeTotal } from "../../usage.js";
 import {
   buildPhaseGroups,
   currentPhaseIndex,
@@ -90,7 +89,7 @@ export function runAgentLive(
   host: HubPaneHost,
   entry: WorkflowAgentEntry,
   runStatus: WorkflowRunStatus,
-): { turns?: number; tokens?: number; tail?: string } | undefined {
+): { turns?: number; tail?: string } | undefined {
   if (entry.recordId === undefined) return undefined;
   const state = displayState(entry, runStatus);
   if (state !== "running" && state !== "paused") return undefined;
@@ -99,7 +98,6 @@ export function runAgentLive(
   if (record === undefined && activity === undefined) return undefined;
   return {
     turns: activity?.turnCount ?? assistantTurnCount(record?.session?.messages),
-    tokens: record ? getLifetimeTotal(record.lifetimeUsage) : entry.tokens,
     tail: runAgentTail(record, activity),
   };
 }

@@ -20,6 +20,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { AgentManager } from "../src/agent-manager.js";
 import { agentRecordEntryData, worktreeLost } from "../src/agent-record-entry.js";
 import { runAgent } from "../src/agent-runner.js";
+import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
@@ -286,6 +287,11 @@ describe("reclaiming an id", () => {
 });
 
 describe("a workflow's resume once the manager evicted the child", () => {
+  // The reopen resolves the child's type through the registry, which earlier
+  // tests in this file happen to have populated by booting the extension. Own
+  // it here so these tests stand alone under a `-t` filter.
+  beforeEach(() => { registerAgents(new Map()); });
+
   /** A stub manager whose resume finds nothing live, as after eviction. */
   function evictingManager(file: string | undefined, firstRun: Partial<AgentRecord> = {}) {
     const settled = (overrides: Partial<AgentRecord> = {}) =>
@@ -302,13 +308,25 @@ describe("a workflow's resume once the manager evicted the child", () => {
         sessionFile: file,
         ...overrides,
       }) as AgentRecord;
+    /** Only the reopened record is live: the first run's was evicted. */
+    let live: AgentRecord | undefined;
+    /** What the reopened child does mid-run, before it settles. */
+    let duringReopen: ((record: AgentRecord, options: any) => void) | undefined;
     const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _type: string, _prompt: string, options: any, onSpawned?: (id: string) => void) => {
       const record = settled(options.reclaim ? { result: "fixed" } : firstRun);
+      if (options.reclaim) live = record;
       onSpawned?.(record.id);
+      if (options.reclaim) duringReopen?.(record, options);
       return { id: record.id, record };
     });
     const resume = vi.fn(async () => undefined);
-    return { manager: { spawnAndWait, resume, abort: vi.fn(), getRecord: () => undefined } as unknown as AgentManager, spawnAndWait, resume };
+    const getRecord = (id: string) => (live?.id === id ? live : undefined);
+    return {
+      manager: { spawnAndWait, resume, abort: vi.fn(), getRecord } as unknown as AgentManager,
+      spawnAndWait,
+      resume,
+      onReopenRun(fn: (record: AgentRecord, options: any) => void) { duringReopen = fn; },
+    };
   }
 
   const request = { agentId: "wf-agent-0", index: 0, prompt: "build it", label: "worker", agentType: "general-purpose" };
@@ -328,6 +346,33 @@ describe("a workflow's resume once the manager evicted the child", () => {
   });
 
   const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
+
+  it("reports the reopened child's counters from zero while it runs (#453)", async () => {
+    // The reopen goes through spawnAndWait, not manager.resume, so it needs the
+    // live forwarding wired on its own. The reclaimed record starts from zero:
+    // its lifetime totals are this continuation's, with no baseline to subtract.
+    const stub = evictingManager(sessionFile, { toolUses: 9, lifetimeUsage: { input: 900, output: 90, cacheWrite: 0 } });
+    const snapshots: unknown[] = [];
+    stub.onReopenRun((record, options) => {
+      record.toolUses = 1;
+      options.onToolActivity?.({ type: "end", toolName: "read" });
+      record.lifetimeUsage = { input: 30, output: 12, cacheWrite: 0 };
+      options.onAssistantUsage?.({ input: 30, output: 12, cacheWrite: 0 });
+    });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request);
+    const resumed = await host.resumeAgent?.("wf-agent-0", "fix it", undefined, info => snapshots.push(info));
+
+    expect(resumed).toMatchObject({ tokens: 42, outputTokens: 12, toolCalls: 1 });
+    // The catch-up report fired from `onSpawned` counts from zero — the first
+    // run's totals are gone with its record — then the installed hooks carry it.
+    expect(snapshots).toEqual([
+      { tokens: 0, outputTokens: 0, toolCalls: 0 },
+      { tokens: 0, outputTokens: 0, toolCalls: 1 },
+      { tokens: 42, outputTokens: 12, toolCalls: 1 },
+    ]);
+  });
 
   it("refuses, starting nothing, when the child's worktree held its work", async () => {
     const stub = evictingManager(sessionFile, { worktree: wt, worktreeResult: { hasChanges: true, branch: "pi-agent-c" } });

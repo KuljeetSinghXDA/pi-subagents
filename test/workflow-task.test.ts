@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkflowEntry } from "../src/workflow/progress.js";
+import { collapse, type WorkflowEntry } from "../src/workflow/progress.js";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
   completeWorkflowTask,
@@ -209,5 +209,47 @@ describe("a result the notification cannot carry", () => {
     const task = settle(long("HEAD"), join(dir, "missing", "wf_capped.workflow.jsonl"));
     expect(task.status).toBe("completed");
     expect(task.resultPath).toBeUndefined();
+  });
+});
+
+describe("updateWorkflowProgressBatch", () => {
+  const agent = (index: number, state: "start" | "done", tokens: number): WorkflowEntry => ({
+    type: "workflow_agent",
+    index,
+    label: `a${index}`,
+    state,
+    tokens,
+  });
+
+  it("keeps one entry per agent however often a running row is re-emitted (#453)", () => {
+    const task = createWorkflowTask({ id: "wf-1", script: "" });
+    const all: WorkflowEntry[] = [];
+    const apply = (entries: WorkflowEntry[]) => {
+      all.push(...entries);
+      updateWorkflowProgressBatch(task, entries);
+    };
+
+    apply([{ type: "workflow_phase", index: 0, title: "scan" }, agent(0, "start", 0), agent(1, "start", 0)]);
+    // Two children interleaving live counter updates, as a fan-out does.
+    for (let i = 1; i <= 50; i++) apply([agent(0, "start", i), agent(1, "start", i * 2)]);
+    apply([{ type: "workflow_log", message: "halfway" }, agent(0, "done", 60), agent(1, "done", 120)]);
+
+    expect(task.workflowProgress).toHaveLength(4);
+    // Lossless for every reader: they all go through collapse.
+    expect(collapse(task.workflowProgress)).toEqual(collapse(all));
+    expect(task.totalTokens).toBe(180);
+    expect(task.doneCount).toBe(2);
+  });
+
+  it("replaces in place, so the log keeps first-emission order and the slots stay valid", () => {
+    const task = createWorkflowTask({ id: "wf-2", script: "" });
+    updateWorkflowProgressBatch(task, [agent(1, "start", 5), agent(0, "start", 7)]);
+    updateWorkflowProgressBatch(task, [agent(1, "done", 50)]);
+
+    // Slot 0 belongs to index 1, slot 1 to index 0 — replaced where it was.
+    expect(task.workflowProgress.map(e => (e.type === "workflow_agent" ? e.index : -1))).toEqual([1, 0]);
+    expect(task.agentSlots.get(1)).toBe(0);
+    expect(task.totalTokens).toBe(57);
+    expect(task.doneCount).toBe(1);
   });
 });

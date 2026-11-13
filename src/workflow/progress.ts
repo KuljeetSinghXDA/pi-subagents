@@ -1,12 +1,13 @@
 /**
  * progress.ts — the workflow progress model, ported from Claude Code.
  *
- * Progress is an **append-only event log**, not a tree. Agent entries are keyed
- * by `index` and last-write-wins, so a running agent is updated by appending a
- * fresh entry with the same index rather than mutating anything. Every view —
- * the inline card, the workflows dialog, the fleet widget — derives its shape
- * by collapsing that log. Keeping the log authoritative is what lets a batched
- * update carry several agents' changes in one message from the worker.
+ * Progress is an **event log**, not a tree. Agent entries are keyed by `index`
+ * and last-write-wins, so a running agent is updated by emitting a fresh entry
+ * with the same index rather than mutating anything. The task's copy keeps only
+ * each agent's latest entry, in place (`updateWorkflowProgressBatch`). Every
+ * view — the inline card, the workflows dialog, the fleet widget — derives its
+ * shape by collapsing that log. Keeping the log authoritative is what lets a
+ * batched update carry several agents' changes in one message from the worker.
  *
  * Two vocabularies, deliberately distinct:
  *   - entry `state` is only start | progress | done | error, with `skipped`,
