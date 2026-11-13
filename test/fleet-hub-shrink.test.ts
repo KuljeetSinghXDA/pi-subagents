@@ -14,7 +14,7 @@
  * On top of that host run the REAL FleetList and the REAL openAgentHub /
  * AgentHub, replaying the user sequence: bar visible → hub opens (the bar's
  * widget is cleared while the overlay masks the layout shrink) → Esc → the
- * fleet's deferred restore deliberately issues no further render. Assertions
+ * fleet's deferred restore brings its previously visible list back. Assertions
  * decode the emitted ANSI into a virtual screen — what a user actually sees.
  */
 import { type Component, Container, TuiMainScreen } from "@earendil-works/pi-tui";
@@ -260,8 +260,7 @@ async function openAndCloseHub(host: Host, fleet: FleetList, initial?: { agentId
   // Esc closes the window.
   overlayEntry.component.handleInput("\x1b");
   await hubPromise;
-  // The Esc keystroke pays for hideOverlay's render; the fleet's deferred
-  // restore (setTimeout 0) registers nothing. Flush both.
+  // Flush hideOverlay's render and the fleet's deferred widget restore.
   await flushRender();
   await flushRender();
   return host.written.slice(beforeClose);
@@ -269,7 +268,13 @@ async function openAndCloseHub(host: Host, fleet: FleetList, initial?: { agentId
 
 /** The clean post-close layout for a given chat height. */
 function expectedTail(): string[] {
-  return ["❯ editor", "? for shortcuts"];
+  return [
+    "❯ editor",
+    expect.stringContaining("← for agents"),
+    expect.stringContaining("main"),
+    expect.stringMatching(/long task.*\d+s · ↓ 13\.1k tokens/),
+    "? for shortcuts",
+  ];
 }
 
 describe("fleet bar hold-down across the hub overlay (real renderer, real components)", () => {
@@ -313,11 +318,11 @@ describe("fleet bar hold-down across the hub overlay (real renderer, real compon
 
     await openAndCloseHub(host, fleet);
 
-    // The viewport shows the tail of the 63-row layout: chat 39-59, spacer,
-    // editor, footer.
+    // The restored fleet leaves the viewport showing chat 44-59 above the
+    // editor, fleet list and footer.
     const screen = decodeScreen(term.written, term.rows);
-    const chatTail = Array.from({ length: 21 }, (_, i) => `chat line ${39 + i}`);
-    expect(screen.filter(r => r.trim() !== "")).toEqual([...chatTail, "❯ editor", "? for shortcuts"]);
+    const chatTail = Array.from({ length: 16 }, (_, i) => `chat line ${44 + i}`);
+    expect(screen.filter(r => r.trim() !== "")).toEqual([...chatTail, ...expectedTail()]);
   });
 
   it("popup ↔ full-screen toggle then Esc: restores the bottom edge", async () => {
@@ -328,7 +333,7 @@ describe("fleet bar hold-down across the hub overlay (real renderer, real compon
 
     const screen = decodeScreen(term.written, term.rows);
     expect(screen.filter(r => r.trim() !== "")).toEqual([
-      "transcript line 1", "transcript line 2", "❯ editor", "? for shortcuts",
+      "transcript line 1", "transcript line 2", ...expectedTail(),
     ]);
   });
 
@@ -340,7 +345,7 @@ describe("fleet bar hold-down across the hub overlay (real renderer, real compon
 
     const screen = decodeScreen(term.written, term.rows);
     expect(screen.filter(r => r.trim() !== "")).toEqual([
-      "transcript line 1", "transcript line 2", "❯ editor", "? for shortcuts",
+      "transcript line 1", "transcript line 2", ...expectedTail(),
     ]);
   });
 });

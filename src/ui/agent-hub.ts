@@ -484,6 +484,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
 
   requestToggle(): void {
     this.syncResume();
+    this.dispose();
     this.onToggle();
   }
 

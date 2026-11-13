@@ -189,7 +189,7 @@ describe("ConversationViewer custom keybindings", () => {
 
 describe("ConversationViewer expand toggle (ctrl+o)", () => {
   /** Live viewer: running agent with stop/steer handlers, so composer and stop-arm interactions apply. */
-  function createLiveViewer(keybindings?: ViewerKeybindings, handlers: { onStop?: () => void; onSteer?: (message: string) => void } = {}) {
+  function createLiveViewer(keybindings?: ViewerKeybindings, handlers: { onStop?: () => void; onSteer?: (message: string) => Promise<boolean> } = {}) {
     const tui = {
       terminal: { rows: 20, columns: 80 },
       requestRender: vi.fn(),

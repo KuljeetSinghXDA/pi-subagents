@@ -79,7 +79,7 @@ export function agentHeaderLines(input: {
   const stats: string[] = [];
   if (tools > 0) stats.push(`${tools} tool${tools === 1 ? "" : "s"}`);
   stats.push(`${elapsed} (${record.status})`);
-  if (tokens > 0) stats.push(formatSessionTokens(tokens, getSessionContextPercent(activity?.session), th, record.compactionCount));
+  if (tokens > 0) stats.push(formatSessionTokens(tokens, getSessionContextPercent(record.session ?? activity?.session), th, record.compactionCount));
   return [
     clampLine([
       { text: `${statusGlyph(record.status, th)} ${renderAgentRecordName(record, th, { bold: true })}${mode ? th.fg("dim", ` (${mode})`) : ""}` },

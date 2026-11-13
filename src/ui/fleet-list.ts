@@ -592,8 +592,7 @@ export class FleetList {
         this.active = true;
         // No cursor reset here: recall resumes where the bar was left. A
         // plain → dismissal zeroed the cursor on the way out (deactivate),
-        // and a hub close left it on the agent you were viewing — which the
-        // now-dismissed bar preserves until you come back.
+        // and a hub close left it on the agent you were viewing.
         this.update();
         return { consume: true };
       }
@@ -690,11 +689,8 @@ export class FleetList {
     if (!ui) return Promise.resolve(undefined);
     if (initial.agentId != null) this.viewingAgentId = initial.agentId;
     if (initial.runId != null) this.viewingWorkflowId = initial.runId;
-    // The hub replaces the roster on screen: hold the bar down for the
-    // overlay's whole life — the popup ↔ full-screen toggles loop inside this
-    // promise — and leave it down after close: the hub collapse reads as a
-    // dismissal (the user's last word on the bar was "go away"), so only ↓ or
-    // a fresh roster brings it back.
+    // Hold the bar down while the hub is open, including popup ↔ full-screen
+    // toggles, without changing the user's explicit dismissal.
     this.hubOpen = true;
     this.update();
     return openAgentHub(
@@ -725,23 +721,12 @@ export class FleetList {
       // instead (its own finally runs it); this timer stands down.
       setTimeout(() => {
         if (this.hubOpen) return;
-        // Dismiss BEFORE clearViewer so its update() never re-registers the
-        // bar. clearViewer's own update() may then reset the dismissal on an
-        // empty roster (the no-hub "next batch starts fresh" rule) — but the
-        // hub collapse is the user's last word on the bar, so it is
-        // re-asserted after: it outlives the drain. ↓ recalls it; a roster
-        // that later fully drains on its own still gives the next batch a
-        // fresh bar.
-        this.dismissed = true;
-        // Drop `active` too — ENTER-on-a-row opened the hub without leaving
-        // the list, and a stale active here would send the recalling ↓ into
-        // invisible navigation instead of the recall branch. Hand-rolled
-        // rather than deactivate() so the viewed-agent cursor survives.
+        // Return keyboard focus to the prompt while keeping the viewed-agent
+        // cursor. Leave dismissal unchanged so only an explicit → hides the
+        // restored bar.
         this.active = false;
         this.previousAgentIds = new Set(this.agentRosterEntries().map(e => e.record.id));
         this.clearViewer();
-        this.dismissed = true;
-        this.update();
       }, 0);
     });
   }
@@ -766,8 +751,15 @@ export class FleetList {
     }
     // Agents open in the hub window with their conversation in the pane —
     // Esc there closes the overlay. The hub's transcript viewer carries
-    // this row's `b` handoff and scrollbar mode.
-    this.openHub({ agentId: entry.record.id });
+    // this row's `b` handoff and scrollbar mode. A failed overlay open still
+    // restores the bar in `openHub`'s finally; report the error here so the
+    // rejected promise has a handler and the user sees why nothing opened.
+    void this.openHub({ agentId: entry.record.id }).catch((err: unknown) => {
+      this.ui?.notify(
+        `Could not open agent hub: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    });
   }
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */

@@ -217,7 +217,8 @@ export function registerSessionLifecycle(
             // never go through unpause — it was never queued. The manager's
             // gate reopen is the only path that reaches it; for every other
             // sessionless record it degrades to unpause's own semantics.
-            return manager.resume(id, prompt).then(resumed => resumed !== undefined);
+            // RPC resume acknowledges background continuation, not its result.
+            return manager.resume(id, prompt, undefined, { isBackground: true }).then(resumed => resumed !== undefined);
           },
           consumeResult: (id) => {
             const record = resolveAgentRef(id);

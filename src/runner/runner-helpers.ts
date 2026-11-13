@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { extractText } from "../context.js";
+import { clearDurableContextUsage } from "../usage.js";
 import { getGraceTurns } from "./runner-settings.js";
 import type { RunOptions } from "./runner-types.js";
 
@@ -62,6 +63,11 @@ export function finalTurnError(session: AgentSession, startIndex = 0): string | 
 export type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
   /** Already resolved: undefined = unlimited. */
   maxTurns?: number;
+  /** Durable runs stop their own engine, not Pi's inactive native engine. */
+  abort?: () => void;
+  onAssistantMessage?: (message: Extract<AgentSessionEvent, { type: "message_end" }>["message"]) => void;
+  /** Durable counts provider boundaries, before tools, only when more work remains. */
+  toolBoundariesOnly?: boolean;
 };
 
 /**
@@ -72,26 +78,31 @@ export function observeRun(session: AgentSession, options: RunObserverOptions): 
   steered: boolean;
   aborted: boolean;
   unsubscribe: () => void;
+  settleControls: () => Promise<void>;
 } {
   let turnCount = 0;
+  const pendingControls: Promise<unknown>[] = [];
   let currentMessageText = "";
   const run = {
     steered: false,
     aborted: false,
     unsubscribe: () => {},
+    settleControls: async () => { await Promise.all(pendingControls); },
   };
   const graceTurns = getGraceTurns();
+  const accountedMessages = new WeakSet<object>();
   run.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
       turnCount++;
       options.onTurnEnd?.(turnCount);
-      if (options.maxTurns != null) {
+      if (options.maxTurns != null && (!options.toolBoundariesOnly || (event.message?.role === "assistant" && event.message.content.some((part) => part.type === "toolCall")))) {
         if (!run.steered && turnCount >= options.maxTurns) {
           run.steered = true;
-          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+          pendingControls.push(session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now."));
         } else if (run.steered && turnCount >= options.maxTurns + graceTurns) {
           run.aborted = true;
-          session.abort();
+          if (options.abort) options.abort();
+          else void session.abort();
         }
       }
     }
@@ -103,23 +114,6 @@ export function observeRun(session: AgentSession, options: RunObserverOptions): 
       if (ame.type === "text_delta") {
         currentMessageText += ame.delta;
         options.onTextDelta?.(ame.delta, currentMessageText);
-      } else if (ame.type === "toolcall_start") {
-        const item = ame.partial.content[ame.contentIndex];
-        if (item && item.type === "toolCall") {
-          options.onToolActivity?.({
-            type: "start",
-            toolName: item.name,
-            toolCallId: item.id,
-            args: item.arguments,
-          });
-        }
-      } else if (ame.type === "toolcall_end") {
-        options.onToolActivity?.({
-          type: "start",
-          toolName: ame.toolCall.name,
-          toolCallId: ame.toolCall.id,
-          args: ame.toolCall.arguments,
-        });
       }
     }
     if (event.type === "tool_execution_start") {
@@ -128,7 +122,9 @@ export function observeRun(session: AgentSession, options: RunObserverOptions): 
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName, toolCallId: event.toolCallId });
     }
-    if (event.type === "message_end" && event.message.role === "assistant") {
+    if (event.type === "message_end" && event.message.role === "assistant" && !accountedMessages.has(event.message)) {
+      accountedMessages.add(event.message);
+      options.onAssistantMessage?.(event.message);
       const u = (event.message as any).usage;
       if (u) options.onAssistantUsage?.({
         input: u.input ?? 0,
@@ -139,6 +135,7 @@ export function observeRun(session: AgentSession, options: RunObserverOptions): 
       });
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
+      clearDurableContextUsage(session);
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
     }
   });

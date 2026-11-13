@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { createActivityTracker } from "../src/index.js";
@@ -23,6 +23,8 @@ vi.mock("../src/worktree.js", () => ({
 }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { createAskAnswerTools, createNestedSubagentTools } from "../src/nested-tools.js";
+import { createGetResultTool } from "../src/tools/inspect-tools.js";
 import { addUsage } from "../src/usage.js";
 import { createWorktree, isWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -1544,12 +1546,12 @@ describe("AgentManager — steer()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
-  it("returns false for an unknown id", () => {
+  it("returns false for an unknown id", async () => {
     manager = new AgentManager();
-    expect(manager.steer("nope", "hi")).toBe(false);
+    await expect(manager.steer("nope", "hi")).resolves.toBe(false);
   });
 
-  it("delivers to a live session via session.steer()", () => {
+  it("delivers to a live session via session.steer()", async () => {
     manager = new AgentManager();
     const steer = vi.fn(() => Promise.resolve());
     let captured: ((s: any) => void) | undefined;
@@ -1561,19 +1563,71 @@ describe("AgentManager — steer()", () => {
     // Simulate the session becoming ready.
     captured?.({ steer, dispose: vi.fn() });
 
-    expect(manager.steer(id, "go left")).toBe(true);
+    await expect(manager.steer(id, "go left")).resolves.toBe(true);
     expect(steer).toHaveBeenCalledWith("go left");
   });
 
-  it("queues onto pendingSteers when the session isn't ready yet", () => {
+  it("does not reject a delivered steer when the steered callback throws", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onSteered = vi.fn(() => { throw new Error("listener failed"); });
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const steer = vi.fn(() => Promise.resolve());
+    manager.getRecord(id)!.session = { ...mockSession(), steer };
+
+    await expect(manager.steer(id, "go left")).resolves.toBe(true);
+    expect(steer).toHaveBeenCalledWith("go left");
+    expect(logged).toHaveBeenCalledWith("[pi-subagents-hub] steered callback failed:", expect.any(Error));
+    logged.mockRestore();
+  });
+
+  it("waits for session acceptance before announcing a steer", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    let accept!: () => void;
+    manager.getRecord(id)!.session = {
+      steer: vi.fn(() => new Promise<void>(resolve => { accept = resolve; })),
+      dispose: vi.fn(),
+    } as any;
+
+    const acceptance = manager.steer(id, "go left");
+    expect(onSteered).not.toHaveBeenCalled();
+    accept();
+    await expect(acceptance).resolves.toBe(true);
+    expect(onSteered).toHaveBeenCalledExactlyOnceWith(manager.getRecord(id), "go left");
+  });
+
+  it("rejects failed session acceptance without announcing a steer", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    let reject!: (error: Error) => void;
+    manager.getRecord(id)!.session = {
+      steer: vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail; })),
+      dispose: vi.fn(),
+    } as any;
+
+    const acceptance = manager.steer(id, "go left");
+    const outcome = Promise.resolve(acceptance).catch(error => error);
+    reject(new Error("session closed"));
+    expect(await outcome).toEqual(new Error("session closed"));
+    expect(onSteered).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)!.status).toBe("running");
+  });
+
+  it("queues onto pendingSteers when the session isn't ready yet", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     const record = manager.getRecord(id)!;
     record.session = undefined; // not ready
 
-    expect(manager.steer(id, "first")).toBe(true);
-    expect(manager.steer(id, "second")).toBe(true);
+    await expect(manager.steer(id, "first")).resolves.toBe(true);
+    await expect(manager.steer(id, "second")).resolves.toBe(true);
     expect(record.pendingSteers).toEqual(["first", "second"]);
   });
 
@@ -1583,7 +1637,7 @@ describe("AgentManager — steer()", () => {
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
     await manager.getRecord(id)?.promise;
     expect(manager.getRecord(id)?.status).toBe("completed");
-    expect(manager.steer(id, "too late")).toBe(false);
+    await expect(manager.steer(id, "too late")).resolves.toBe(false);
   });
 });
 
@@ -2105,6 +2159,91 @@ describe("AgentManager — pendingSteers flush", () => {
     expect(record.pendingSteers).toBeUndefined();
   });
 
+  it("keeps only the rejected steers, in order, when the flush partially fails", async () => {
+    const steer = vi.fn()
+      .mockRejectedValueOnce(new Error("session closed"))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("session closed again"));
+    let createSession: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(() => {
+        createSession = () => opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+      }),
+    );
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await manager.steer(id, "first");
+    await manager.steer(id, "second");
+    await manager.steer(id, "third");
+
+    createSession!();
+    await new Promise(r => setImmediate(r));
+
+    expect(steer.mock.calls.map(c => c[0])).toEqual(["first", "second", "third"]);
+    // Exactly the failed messages stay, in their original order, so a later
+    // session flush retries them instead of losing them.
+    expect(record.pendingSteers).toEqual(["first", "third"]);
+  });
+
+  it("retries a retained steer on the next session, then clears it", async () => {
+    const firstSessionSteer = vi.fn()
+      .mockRejectedValueOnce(new Error("session closed"))
+      .mockResolvedValueOnce(undefined);
+    const secondSessionSteer = vi.fn().mockResolvedValue(undefined);
+    const sessions = [
+      { steer: firstSessionSteer, dispose: vi.fn() },
+      { steer: secondSessionSteer, dispose: vi.fn() },
+    ];
+    let nextSession = 0;
+    let createSession: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(() => {
+        createSession = () => opts.onSessionCreated?.(sessions[nextSession++]);
+      }),
+    );
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await manager.steer(id, "first");
+    await manager.steer(id, "second");
+
+    createSession!();
+    await new Promise(r => setImmediate(r));
+    expect(record.pendingSteers).toEqual(["first"]);
+
+    createSession!();
+    await new Promise(r => setImmediate(r));
+    expect(secondSessionSteer).toHaveBeenCalledExactlyOnceWith("first");
+    expect(record.pendingSteers).toBeUndefined();
+  });
+
+  it("treats a synchronous steer throw like a rejected delivery", async () => {
+    const steer = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("extension command"); })
+      .mockResolvedValueOnce(undefined);
+    let createSession: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(() => {
+        createSession = () => opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+      }),
+    );
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await manager.steer(id, "first");
+    await manager.steer(id, "second");
+
+    expect(() => createSession!()).not.toThrow();
+    await new Promise(r => setImmediate(r));
+
+    expect(steer.mock.calls.map(c => c[0])).toEqual(["first", "second"]);
+    expect(record.pendingSteers).toEqual(["first"]);
+  });
+
   // The viewers, an @handle and the RPC all steer through the manager and none
   // of them emits the lifecycle event itself — this callback is the one place
   // `subagents:steered` comes from for every path except the tool.
@@ -2124,18 +2263,18 @@ describe("AgentManager — pendingSteers flush", () => {
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
     const record = manager.getRecord(id)!;
 
-    expect(manager.steer(id, "before session")).toBe(true);
+    await expect(manager.steer(id, "before session")).resolves.toBe(true);
     expect(onSteered).toHaveBeenLastCalledWith(record, "before session");
 
     createSession!();
-    expect(manager.steer(id, "live")).toBe(true);
+    await expect(manager.steer(id, "live")).resolves.toBe(true);
     expect(steer).toHaveBeenLastCalledWith("live");
     expect(onSteered).toHaveBeenLastCalledWith(record, "live");
     expect(onSteered).toHaveBeenCalledTimes(2);
 
     finish!();
     await record.promise;
-    expect(manager.steer(id, "too late")).toBe(false);
+    await expect(manager.steer(id, "too late")).resolves.toBe(false);
     expect(onSteered).toHaveBeenCalledTimes(2);
   });
 
@@ -2891,6 +3030,81 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
     await manager.awaitStartup(id);
 
     expect(createWorktree).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AgentManager — questions and nested resume spend", () => {
+  let manager: AgentManager;
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+
+  const outcome = () => ({
+    responseText: "done",
+    session: mockSession(),
+    aborted: false,
+    steered: false,
+  });
+
+  beforeEach(() => {
+    manager = new AgentManager(undefined, 1);
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("drops pending parent questions when the initial run rejects", async () => {
+    const run = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    vi.mocked(runAgent).mockReturnValueOnce(run.promise);
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "questioner", isBackground: true });
+    const record = manager.getRecord(id)!;
+    const [ask] = createAskAnswerTools({ manager, pi: { sendMessage: vi.fn() } as any, parentAgentId: id });
+    await ask.execute("ask", { question: "Which module?" }, undefined, undefined, mockCtx);
+    expect(record.questions?.[0].state).toBe("delivered");
+
+    run.reject(new Error("provider failed"));
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.questions?.[0].state).toBe("dropped");
+    const result = await createGetResultTool({
+      resolveAgentRef: () => record, resolveMention: () => undefined,
+      isShowCostEnabled: () => false, outbox: { cancel: vi.fn() }, pi: mockPi,
+    } as any).execute("result", { agent_id: id }, undefined, undefined, mockCtx);
+    expect(result.content[0]).toEqual(expect.objectContaining({ text: expect.not.stringContaining("[QUESTION for you") }));
+  });
+
+  it("includes nested resume spend in every ancestor's total", async () => {
+    const topRun = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    const middleRun = deferred<Awaited<ReturnType<typeof runAgent>>>();
+    vi.mocked(runAgent).mockReturnValueOnce(topRun.promise).mockReturnValueOnce(middleRun.promise).mockResolvedValueOnce(outcome());
+    const topId = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "top", isBackground: true });
+    const middleId = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "middle", parentAgentId: topId });
+    const child = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "go", { description: "child", parentAgentId: middleId });
+    vi.mocked(resumeAgent).mockImplementationOnce(async (_session, _prompt, options) => {
+      options!.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+      return { text: "continued", aborted: false, steered: false };
+    });
+    const [agent] = createNestedSubagentTools({
+      manager, pi: mockPi, parentAgentId: middleId, depth: 2, maxSubagentDepth: 3,
+      allowedSubagents: "all", configCwd: mockCtx.cwd,
+    });
+    await agent.execute("resume", {
+      resume: child.id, prompt: "Continue", description: "continue", subagent_type: "general-purpose",
+    }, undefined, undefined, mockCtx);
+
+    for (const id of [child.id, middleId, topId]) {
+      expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 2, cost: 0.25 });
+    }
+    middleRun.resolve(outcome());
+    await manager.getRecord(middleId)!.promise;
+    topRun.resolve(outcome());
+    await manager.getRecord(topId)!.promise;
   });
 });
 

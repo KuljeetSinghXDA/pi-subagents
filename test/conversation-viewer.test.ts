@@ -795,8 +795,8 @@ describe("ConversationViewer", () => {
   describe("steer composer", () => {
     const W = 80;
 
-    function makeViewer(opts: { status?: AgentRecord["status"]; onSteer?: (m: string) => void } = {}) {
-      const onSteer = opts.onSteer ?? vi.fn();
+    function makeViewer(opts: { status?: AgentRecord["status"]; onSteer?: (m: string) => Promise<boolean> } = {}) {
+      const onSteer = opts.onSteer ?? vi.fn().mockResolvedValue(true);
       const tui = mockTui(30, W);
       const viewer = new ConversationViewer(
         tui, mockSession(), mockRecord({ status: opts.status ?? "running" }),
@@ -816,14 +816,120 @@ describe("ConversationViewer", () => {
       expect(out).not.toContain("Enter steer");
     });
 
-    it("typing then Enter sends the trimmed message and closes the composer", () => {
+    it("typing then Enter sends the trimmed message and closes the composer", async () => {
       const { viewer, onSteer } = makeViewer();
       viewer.handleInput("\r"); // open composer
       for (const ch of "  hello  ") viewer.handleInput(ch);
       viewer.handleInput("\r"); // send
 
       expect(onSteer).toHaveBeenCalledWith("hello");
+      await vi.waitFor(() => expect(viewer.composing).toBe(false));
       expect(viewer.render(W).join("\n")).not.toContain("Enter send"); // composer closed
+    });
+
+    it("keeps the draft until steering acceptance and blocks duplicate sends", async () => {
+      let accept!: (value: boolean) => void;
+      const onSteer = vi.fn(() => new Promise<boolean>(resolve => { accept = resolve; }));
+      const { viewer } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      viewer.handleInput("keep this draft");
+      viewer.handleInput("\r");
+
+      expect(viewer.composing).toBe(true);
+      expect(viewer.render(W).join("\n")).toContain("Sending");
+      expect(viewer.render(W).join("\n")).toContain("keep this draft");
+      viewer.handleInput("\r");
+      expect(onSteer).toHaveBeenCalledExactlyOnceWith("keep this draft");
+      accept(true);
+      await vi.waitFor(() => expect(viewer.composing).toBe(false));
+    });
+
+    it("keeps a rejected draft with a visible error and allows retry", async () => {
+      let reject!: (error: Error) => void;
+      const onSteer = vi.fn()
+        .mockImplementationOnce(() => new Promise<boolean>((_resolve, fail) => { reject = fail; }))
+        .mockResolvedValue(true);
+      const { viewer } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      viewer.handleInput("  keep this draft  ");
+      viewer.handleInput("\r");
+      reject(new Error("session closed"));
+
+      await vi.waitFor(() => expect(viewer.render(W).join("\n")).toContain("Failed to send: session closed"));
+      expect(viewer.composing).toBe(true);
+      expect(viewer.render(W).join("\n")).toContain("  keep this draft  ");
+      viewer.handleInput("\r");
+      await vi.waitFor(() => expect(viewer.composing).toBe(false));
+      expect(onSteer).toHaveBeenNthCalledWith(2, "keep this draft");
+    });
+
+    it("keeps a refused send visible instead of losing the draft", async () => {
+      const { viewer } = makeViewer({ onSteer: vi.fn().mockResolvedValue(false) });
+      viewer.handleInput("\r");
+      viewer.handleInput("too late");
+      viewer.handleInput("\r");
+
+      await vi.waitFor(() => expect(viewer.render(W).join("\n")).toContain("Failed to send: Agent is not running"));
+      expect(viewer.composing).toBe(true);
+      expect(viewer.render(W).join("\n")).toContain("too late");
+    });
+
+    it("Esc closes the composer while a steer is pending, without cancelling it", async () => {
+      let accept!: (value: boolean) => void;
+      const onSteer = vi.fn(() => new Promise<boolean>(resolve => { accept = resolve; }));
+      const { viewer } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      viewer.handleInput("keep waiting");
+      viewer.handleInput("\r");
+
+      const sending = viewer.render(W).join("\n");
+      expect(sending).toContain("Sending");
+      expect(sending).toContain("Esc cancel");
+
+      viewer.handleInput("\x1b"); // Esc
+      expect(viewer.composing).toBe(false);
+      expect(onSteer).toHaveBeenCalledExactlyOnceWith("keep waiting");
+      // The steer is still in flight: no second one may start from the idle footer.
+      expect(viewer.render(W).join("\n")).not.toContain("Enter steer");
+
+      accept(true);
+      await vi.waitFor(() => expect((viewer as any).sending).toBe(false));
+      expect(viewer.render(W).join("\n")).toContain("Enter steer");
+    });
+
+    it("does not render or clear the composer when a resolved steer lands after disposal", async () => {
+      let accept!: (value: boolean) => void;
+      const onSteer = vi.fn(() => new Promise<boolean>(resolve => { accept = resolve; }));
+      const { viewer, tui } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      viewer.handleInput("late");
+      viewer.handleInput("\r");
+      await vi.waitFor(() => expect(onSteer).toHaveBeenCalled());
+      const composer = (viewer as any).composer;
+      viewer.dispose();
+      tui.requestRender.mockClear();
+
+      accept(true);
+      await vi.waitFor(() => expect((viewer as any).sending).toBe(false));
+      expect((viewer as any).composer).toBe(composer);
+      expect(tui.requestRender).not.toHaveBeenCalled();
+    });
+
+    it("does not render or record a rejected steer after disposal", async () => {
+      let reject!: (error: Error) => void;
+      const onSteer = vi.fn(() => new Promise<boolean>((_resolve, fail) => { reject = fail; }));
+      const { viewer, tui } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      viewer.handleInput("late");
+      viewer.handleInput("\r");
+      await vi.waitFor(() => expect(onSteer).toHaveBeenCalled());
+      viewer.dispose();
+      tui.requestRender.mockClear();
+
+      reject(new Error("late failure"));
+      await vi.waitFor(() => expect((viewer as any).sending).toBe(false));
+      expect((viewer as any).steerError).toBeUndefined();
+      expect(tui.requestRender).not.toHaveBeenCalled();
     });
 
     it("Esc cancels the composer without sending", () => {

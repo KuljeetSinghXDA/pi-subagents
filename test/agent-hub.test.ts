@@ -5,6 +5,7 @@ import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 import { AgentHub, type AgentHubDeps, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
 import { type AgentActivity } from "../src/ui/agent-widget.js";
+import { DISABLE_TERMINAL_MOUSE, ENABLE_TERMINAL_MOUSE } from "../src/ui/terminal-mouse.js";
 
 // The transcript components read pi's global theme; only the TUI normally sets it up.
 initTheme(undefined, false);
@@ -675,6 +676,38 @@ describe("agent hub open modes", () => {
 });
 
 describe("agent hub popup ↔ full-screen toggle", () => {
+  it("disposes the old timer, viewer subscription and mouse capture before f reopens", async () => {
+    vi.useFakeTimers();
+    const unsubscribe = vi.fn();
+    const session = { messages: [], subscribe: vi.fn(() => unsubscribe) } as unknown as AgentRecord["session"];
+    const h = harness([makeRecord({ session })]);
+    try {
+      const opened = h.open({ agentId: "a1" });
+      h.frame();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      h.tui.terminal.write.mockClear();
+      h.press("f");
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(h.tui.terminal.write).toHaveBeenCalledExactlyOnceWith(DISABLE_TERMINAL_MOUSE);
+      await h.flush();
+      expect(h.components).toHaveLength(2);
+      expect(h.tui.terminal.write).toHaveBeenLastCalledWith(ENABLE_TERMINAL_MOUSE);
+      // A second disposal of the old component cannot release the new capture.
+      h.tui.terminal.write.mockClear();
+      h.components[0].dispose();
+      expect(h.tui.terminal.write).not.toHaveBeenCalled();
+      h.press(ESC);
+      await h.flush();
+      await opened.promise;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(unsubscribe).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const component of h.components) component.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("f expands the popup into the full-screen hub, same conversation", async () => {
     const h = harness([makeRecord({ id: "a1" })]);
     h.open({ agentId: "a1" });

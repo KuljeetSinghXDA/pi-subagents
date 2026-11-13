@@ -25,9 +25,11 @@ describe("memory", () => {
     const fakeHome = join(tmpDir, "home");
     mkdirSync(fakeHome, { recursive: true });
     mockHomedir.mockReturnValue(fakeHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", join(tmpDir, "agent-dir"));
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -79,8 +81,39 @@ describe("memory", () => {
       expect(() => resolveMemoryDir(".hidden", "project", "/workspace")).toThrow("Unsafe agent name");
     });
 
-    it("throws on names with spaces", () => {
-      expect(() => resolveMemoryDir("foo bar", "project", "/workspace")).toThrow("Unsafe agent name");
+    it.each(["user", "project", "local"] as const)("keeps distinct display names separate in %s scope", scope => {
+      const names = ["Code Reviewer", "Code-Reviewer", "Code_Reviewer", "Code  Reviewer", "Code@Reviewer", "审查员", "审阅员", "é", "e\u0301"];
+      const dirs = names.map(name => resolveMemoryDir(name, scope, tmpDir));
+      expect(new Set(dirs).size).toBe(names.length);
+      names.forEach((name, i) => {
+        expect(resolveMemoryDir(name, scope, tmpDir)).toBe(dirs[i]);
+        ensureMemoryDir(dirs[i]);
+        writeFileSync(join(dirs[i], "MEMORY.md"), `Memory for ${name}`);
+      });
+      names.forEach((name, i) => {
+        expect(readMemoryIndex(resolveMemoryDir(name, scope, tmpDir))).toBe(`Memory for ${name}`);
+        expect(buildMemoryBlock(name, scope, tmpDir)).toContain(dirs[i]);
+      });
+    });
+
+    it("preserves existing safe-name memory instead of reusing a lossy alias", () => {
+      const safeDir = resolveMemoryDir("Code-Reviewer", "project", tmpDir);
+      ensureMemoryDir(safeDir);
+      writeFileSync(join(safeDir, "MEMORY.md"), "Existing memory");
+      // Older local sanitizers put unsafe names here too. Ownership cannot be
+      // recovered, so migration must be manual, never a silent move or merge.
+      const encodedDir = resolveMemoryDir("Code Reviewer", "project", tmpDir);
+      expect(encodedDir).not.toBe(safeDir);
+      expect(buildMemoryBlock("Code Reviewer", "project", tmpDir)).not.toContain("Existing memory");
+      expect(buildMemoryBlock("Code-Reviewer", "project", tmpDir)).toContain("Existing memory");
+      expect(readMemoryIndex(safeDir)).toBe("Existing memory");
+    });
+
+    it("uses a reserved bounded directory name for Unicode-only names", () => {
+      const dir = resolveMemoryDir("审查员", "project", tmpDir);
+      expect(dir).toMatch(/\/\.encoded-[a-f0-9]{64}$/);
+      expect(() => resolveMemoryDir(dir.split("/").at(-1)!, "project", tmpDir)).toThrow("Unsafe agent name");
+      expect(resolveMemoryDir("\ud800", "project", tmpDir)).not.toBe(resolveMemoryDir("\ud801", "project", tmpDir));
     });
 
     it("allows hyphens, underscores, and dots in names", () => {

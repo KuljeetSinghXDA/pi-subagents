@@ -102,8 +102,12 @@ export function registerMentionInputHook(pi: ExtensionAPI, deps: MentionHookDeps
 
       if (record.status === "running" || record.status === "queued") {
         record.resultConsumed = false;
-        manager.steer(record.id, mention.message);
-        ctx.ui.notify(`Sent to ${target}`, "info");
+        try {
+          if (!await manager.steer(record.id, mention.message)) throw new Error("Agent is not running");
+          ctx.ui.notify(`Sent to ${target}`, "info");
+        } catch (err) {
+          ctx.ui.notify(`Failed to send to ${target}: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
         return { action: "handled" };
       }
 

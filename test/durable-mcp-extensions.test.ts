@@ -50,7 +50,6 @@ describe("Durable runner with extensions and MCP tools", () => {
   });
 
   it("bridges custom extension and MCP tools, delivering lifecycle events and formatted results", async () => {
-    const activities: any[] = [];
     const events: any[] = [];
     const mockTool = {
       name: "mcp__fixture__echo",
@@ -69,7 +68,6 @@ describe("Durable runner with extensions and MCP tools", () => {
     };
 
     const durableTool = bridgePiToolToDurableTool(mockTool as any, {
-      onActivity: (act) => activities.push(act),
       onToolStart: (info) => sessionMock._emit({ type: "tool_execution_start", ...info }),
       onToolUpdate: (info) => sessionMock._emit({ type: "tool_execution_update", ...info }),
       onToolResult: (res) => {
@@ -84,9 +82,6 @@ describe("Durable runner with extensions and MCP tools", () => {
     expect(mockTool.execute).toHaveBeenCalledTimes(1);
     expect(res.isError).toBe(false);
     expect(res.output).toEqual([{ type: "text", text: "echo: test input" }]);
-    expect(activities).toHaveLength(2);
-    expect(activities[0].type).toBe("start");
-    expect(activities[1].type).toBe("end");
     expect(events.map(e => e.type)).toEqual([
       "tool_execution_start",
       "tool_execution_update",

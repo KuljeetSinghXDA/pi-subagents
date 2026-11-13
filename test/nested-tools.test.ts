@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
-import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
+import { createAskAnswerTools, createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
@@ -384,6 +384,60 @@ describe("child-safe nested Agent tools", () => {
     // The wait was cancelled but the child was never aborted or consumed.
     expect(record.status).toBe("running");
     settleChild?.();
+  });
+
+  it.each(["spawn", "resume", "fetch"])("routes ask_parent past an owner actually waiting on %s", async (mode) => {
+    const parent = { id: "parent-1", status: "running", isBackground: true, session: { steer: vi.fn(async () => {}) } };
+    const child = { id: "child-1", type: "scout", status: "running", isBackground: true, parentAgentId: "parent-1", promise: undefined as Promise<string> | undefined, resultConsumed: false };
+    records.set(parent.id, parent);
+    records.set(child.id, child);
+    let finish!: () => void;
+    const result = new Promise<any>(resolve => { finish = () => { child.status = "completed"; resolve({ id: child.id, record: child }); }; });
+    child.promise = result.then(() => "done");
+    spawnAndWait.mockReturnValueOnce(result);
+    vi.mocked(manager.resume).mockImplementationOnce(async () => (await result).record);
+    const [agent, getResult] = tools();
+    const pending = mode === "fetch"
+      ? execute(getResult, { agent_id: child.id, wait: true })
+      : execute(agent, { subagent_type: "scout", description: "child", prompt: "go", ...(mode === "resume" ? { resume: child.id } : {}) });
+    const sendMessage = vi.fn();
+    const [ask] = createAskAnswerTools({ manager, pi: { sendMessage } as any, parentAgentId: child.id });
+    await execute(ask, { question: "Which file?" });
+    expect(parent.session.steer).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalled();
+    finish();
+    await pending;
+    expect((parent as any).waitingForChildren ?? 0).toBe(0);
+    expect(child.resultConsumed).toBe(true);
+  });
+
+  it("waits through nested asynchronous startup and reports terminal failure", async () => {
+    const child = { id: "child-1", status: "running", parentAgentId: "parent-1", error: undefined as string | undefined };
+    records.set(child.id, child);
+    const [, getResult] = tools();
+    let returned = false;
+    const pending = execute(getResult, { agent_id: child.id, wait: true }).then(result => { returned = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(returned).toBe(false);
+    child.status = "error";
+    child.error = "setup failed";
+    expect((await pending).content[0].text).toContain("setup failed");
+  });
+
+  it("clears actual wait tracking on cancellation without consuming a live child", async () => {
+    const parent = { id: "parent-1", status: "running" } as any;
+    const child = { id: "child-1", status: "running", parentAgentId: parent.id, promise: new Promise(() => {}) } as any;
+    records.set(parent.id, parent);
+    records.set(child.id, child);
+    const [, getResult] = tools();
+    const controller = new AbortController();
+    const pending = getResult.execute("wait", { agent_id: child.id, wait: true }, controller.signal, undefined, ctx());
+    expect(parent.waitingForChildren).toBe(1);
+    const rejected = expect(pending).rejects.toThrow("cancelled");
+    controller.abort(new Error("cancelled"));
+    await rejected;
+    expect(parent.waitingForChildren).toBe(0);
+    expect(child.resultConsumed).not.toBe(true);
   });
 
   it("still rejects unknown types when the project configures a fallback", async () => {

@@ -593,6 +593,8 @@ export async function continueParkedMainTurn(
       thinkingLevel: ctx.thinkingLevel,
       scopedModels: ctx.scopedModels ? [...ctx.scopedModels] : undefined,
     });
+    // Keep the active registry's custom providers and virtual-model routing.
+    session.agent.streamFunction = (model, context, options) => ctx.modelRegistry.streamSimple(model, context, options);
     const result = await continueSessionBare(session);
     if (result.continuationError) {
       ctx.ui.notify(`The parked main turn was healed, but its continuation failed: ${result.continuationError}`, "warning");

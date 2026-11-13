@@ -6,7 +6,6 @@ import type { Context, JsonValue } from "@earendil-works/chord";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
-import type { ToolActivity } from "./runner-types.js";
 
 /** Set of tools that are idempotent and safe to rerun if interrupted by process restart. */
 const REPLAY_SAFE_TOOLS = new Set([
@@ -19,7 +18,6 @@ const REPLAY_SAFE_TOOLS = new Set([
 ]);
 
 export interface BridgeToolOptions {
-  onActivity?: (activity: ToolActivity) => void;
   beforeToolCall?: (context: any, signal?: AbortSignal) => Promise<any> | any;
   afterToolCall?: (context: any, signal?: AbortSignal) => Promise<any> | any;
   onToolStart?: (info: { toolName: string; toolCallId: string; args: any }) => void;
@@ -76,18 +74,13 @@ export function bridgePiToolToDurableTool(
         throw new Error("Aborted");
       }
 
-      options.onActivity?.({
-        type: "start",
-        toolName: tool.name,
-        toolCallId: callId,
-        args,
-      });
       options.onToolStart?.({
         toolName: tool.name,
         toolCallId: callId,
         args,
       });
 
+      let result: AgentToolResult<JsonValue | undefined>;
       try {
         const updateCallback = (partial: any) => {
           if (!partial) return;
@@ -117,83 +110,77 @@ export function bridgePiToolToDurableTool(
             ? (options.toolContext as (id: string) => unknown)(callId)
             : options.toolContext;
 
-        const result = await tool.execute(
+        result = await tool.execute(
           callId,
           args,
           options.signal,
           updateCallback,
           effectiveToolContext,
         );
+      } catch (err: unknown) {
+        result = {
+          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+          details: {},
+          isError: true,
+        };
+      }
 
-        options.onActivity?.({
-          type: "end",
-          toolName: tool.name,
-          toolCallId: callId,
-        });
+      // Legacy tool shapes returned `output`/string `content`; keep reading them.
+      const rawResult = result as unknown as { content?: unknown; output?: unknown };
+      const output: ToolResultMessage["content"] = Array.isArray(rawResult.content)
+        ? (rawResult.content as ToolResultMessage["content"])
+        : typeof rawResult.content === "string"
+          ? [{ type: "text" as const, text: rawResult.content }]
+          : typeof rawResult.output === "string"
+            ? [{ type: "text" as const, text: rawResult.output }]
+            : Array.isArray(rawResult.output)
+              ? (rawResult.output as ToolResultMessage["content"])
+              : [];
 
-        const output: ToolResultMessage["content"] = Array.isArray(result?.content)
-          ? (result.content as ToolResultMessage["content"])
-          : typeof result?.content === "string"
-            ? [{ type: "text" as const, text: result.content }]
-            : typeof (result as any)?.output === "string"
-              ? [{ type: "text" as const, text: (result as any).output }]
-              : Array.isArray((result as any)?.output)
-                ? (result as any).output
-                : [];
-
-        let finalOutput = output;
+      let finalOutput = output;
+      let finalDetails = result?.details;
+      let finalIsError = result?.isError === true;
+      let finalUsage = result?.usage;
+      try {
         if (options.afterToolCall) {
           const hookResult = await options.afterToolCall(
             {
               toolCall: { type: "toolCall", id: callId, name: tool.name, arguments: args },
               args,
-              result: { content: output, details: result?.details },
-              isError: result?.isError === true,
+              result: { content: output, details: result?.details, usage: result?.usage },
+              isError: finalIsError,
             },
             options.signal,
           );
-          if (hookResult?.content) {
-            finalOutput = hookResult.content;
-          }
+          finalOutput = hookResult?.content ?? finalOutput;
+          finalDetails = hookResult?.details ?? finalDetails;
+          finalIsError = hookResult?.isError ?? finalIsError;
+          finalUsage = hookResult?.usage ?? finalUsage;
         }
-
-        options.onToolResult?.({
-          role: "toolResult",
-          toolName: tool.name,
-          toolCallId: callId,
-          content: finalOutput,
-          details: result?.details,
-          isError: result?.isError === true,
-          timestamp: Date.now(),
-        });
-
-        return {
-          output: finalOutput,
-          isError: result?.isError === true,
-          details: result?.details as JsonValue,
-        };
       } catch (err: unknown) {
-        options.onActivity?.({
-          type: "end",
-          toolName: tool.name,
-          toolCallId: callId,
-        });
-
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        options.onToolResult?.({
-          role: "toolResult",
-          toolName: tool.name,
-          toolCallId: callId,
-          content: [{ type: "text" as const, text: errorMsg }],
-          isError: true,
-          timestamp: Date.now(),
-        });
-
-        return {
-          output: [{ type: "text" as const, text: errorMsg }],
-          isError: true,
-        };
+        finalOutput = [{ type: "text", text: err instanceof Error ? err.message : String(err) }];
+        finalDetails = {};
+        finalIsError = true;
+        finalUsage = undefined;
       }
+
+      options.onToolResult?.({
+        role: "toolResult",
+        toolName: tool.name,
+        toolCallId: callId,
+        content: finalOutput,
+        details: finalDetails,
+        isError: finalIsError,
+        usage: finalUsage,
+        timestamp: Date.now(),
+      });
+
+      return {
+        output: finalOutput,
+        isError: finalIsError,
+        details: finalDetails as JsonValue,
+        usage: finalUsage,
+      };
     },
   });
 }

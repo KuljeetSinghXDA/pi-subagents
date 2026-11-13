@@ -58,7 +58,7 @@ describe("cross-extension RPC", () => {
       resumeAgent: vi.fn().mockResolvedValue(true),
       getRecord: vi.fn().mockReturnValue({}),
       consumeResult: vi.fn().mockReturnValue(true),
-      steer: vi.fn().mockReturnValue(true),
+      steer: vi.fn().mockResolvedValue(true),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
@@ -551,6 +551,19 @@ describe("cross-extension RPC", () => {
   // --- steer ---
 
   describe("steer RPC", () => {
+    it("waits for acceptance and returns session rejection as an error reply", async () => {
+      let reject!: (error: Error) => void;
+      vi.mocked(manager.steer).mockImplementation(() => new Promise<boolean>((_resolve, fail) => { reject = fail; }));
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-pending", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-pending", agentId: "agent-42", message: "try now" });
+
+      expect(reply).not.toHaveBeenCalled();
+      reject(new Error("session closed"));
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledExactlyOnceWith({ success: false, error: "session closed" }));
+    });
+
     it("delivers a message to a running top-level agent", async () => {
       registerRpcHandlers(deps);
       const reply = vi.fn();
@@ -589,7 +602,7 @@ describe("cross-extension RPC", () => {
     });
 
     it("says so when the agent has already finished", async () => {
-      (manager.steer as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue(false);
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:steer:reply:req-m4", reply);

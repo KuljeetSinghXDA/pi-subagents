@@ -76,6 +76,7 @@ export class ConcurrencyPool {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        if (!record.promise) record.resultConsumed = true;
       }
       return false;
     }

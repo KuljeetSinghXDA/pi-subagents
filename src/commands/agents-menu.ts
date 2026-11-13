@@ -291,7 +291,14 @@ export async function showAgentsMenu(ctx: ExtensionCommandContext, deps: AgentsM
     await reviveAgentsCommand(ctx, undefined, pauseDeps);
     await showAgentsMenu(ctx, deps);
   } else if (choice === "Agent hub (roster)") {
-    fleet.openHub();
+    try {
+      await fleet.openHub();
+    } catch (err) {
+      ctx.ui.notify(
+        `Could not open agent hub: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
   } else if (choice.startsWith("Agent types (")) {
     await showAllAgentsList(ctx, deps);
     await showAgentsMenu(ctx, deps);
@@ -381,7 +388,14 @@ export async function viewAgentConversation(ctx: ExtensionCommandContext, record
     ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
     return;
   }
-  await fleet.openHub({ agentId: record.id }, ctx.ui as never);
+  try {
+    await fleet.openHub({ agentId: record.id }, ctx.ui as never);
+  } catch (err) {
+    ctx.ui.notify(
+      `Could not open agent hub: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
+    );
+  }
 }
 
 export async function showAgentDetail(ctx: ExtensionCommandContext, name: string, deps: AgentsMenuDeps) {

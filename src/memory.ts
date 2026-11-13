@@ -11,6 +11,7 @@
  * so existing memories aren't orphaned.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, } from "node:path";
@@ -67,12 +68,21 @@ function projectMemoryDir(cwd: string, root: string, agentName: string): string 
 
 /**
  * Resolve the memory directory path for a given agent + scope + cwd.
- * Throws if agentName contains path traversal characters, or if a project or
- * local path goes through a symlinked `.pi` or memory root.
+ * Existing safe names retain their paths. Other display names use a reserved
+ * namespace and a digest of the exact name, never a lossy sanitized alias.
+ * Throws on path traversal characters, or if a project or local path goes
+ * through a symlinked `.pi` or memory root. Never migrates existing storage.
  */
 export function resolveMemoryDir(agentName: string, scope: MemoryScope, cwd: string): string {
-  if (isUnsafeName(agentName)) {
+  if (!agentName || agentName.length > 128 || agentName.startsWith(".") || /[/\\\0]/.test(agentName)) {
     throw new Error(`Unsafe agent name for memory directory: "${agentName}"`);
+  }
+  if (isUnsafeName(agentName)) {
+    // Leading dots cannot occur in safe names. Hash UTF-16 code units so even
+    // distinct unpaired surrogates cannot collapse through UTF-8 replacement.
+    // Older lossy aliases have ambiguous ownership: leave them untouched for
+    // manual migration rather than silently reading or moving another memory.
+    agentName = `.encoded-${createHash("sha256").update(agentName, "utf16le").digest("hex")}`;
   }
   switch (scope) {
     case "user": {

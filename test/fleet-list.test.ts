@@ -26,6 +26,29 @@ const ENTER = "\r";
 // Kitty-protocol key-RELEASE for ↓ (event type 3) — listeners receive these too.
 const DOWN_RELEASE = "\x1b[1;1:3B";
 
+/**
+ * Collect unhandled rejections for the duration of a block.
+ *
+ * Vitest installs its own handler, so `process.on` alone would not observe
+ * them — `removeAllListeners` is used and the originals restored afterwards.
+ */
+async function withUnhandledRejectionSpy(fn: () => Promise<void>): Promise<unknown[]> {
+  const seen: unknown[] = [];
+  const prior = process.listeners("unhandledRejection");
+  process.removeAllListeners("unhandledRejection");
+  const capture = (reason: unknown) => { seen.push(reason); };
+  process.on("unhandledRejection", capture);
+  try {
+    await fn();
+    // Unhandled rejections are reported on a later macrotask, not a microtask.
+    await new Promise(r => setTimeout(r, 20));
+  } finally {
+    process.off("unhandledRejection", capture);
+    for (const listener of prior) process.on("unhandledRejection", listener as never);
+  }
+  return seen;
+}
+
 const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
 
 /** An agent that renders as a badge — no default agent configures a color. */
@@ -461,10 +484,7 @@ describe("FleetList navigation", () => {
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
-  it("REPRO D4: a bar that was visible when the hub opened stays closed after the hub closes", async () => {
-    // User flow: agents running, bar showing; opening the hub collapses it;
-    // closing the hub with Esc must leave it closed. The current code
-    // "restores it exactly as it was" and brings the bar back — the defect.
+  it("restores a visible bar after the hub closes without waiting for fresh agent activity", async () => {
     const h = harness([makeRecord(), makeRecord({ id: "a2" })]);
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true); // visible pre-open
 
@@ -474,14 +494,14 @@ describe("FleetList navigation", () => {
     await h.closeOverlay();
     await hub;
     await h.settleBar();
-    expect(h.render()).toEqual([]); // stays closed — the defect reopens it
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
 
-    // ↓ brings it back on demand.
+    // The restored bar starts with prompt focus, not invisible navigation.
     expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
   });
 
-  it("keeps the bar down after the hub closes; ↓ recalls it", async () => {
+  it("hides the bar across updates while the hub is open and restores it on close", async () => {
     const h = harness([makeRecord()]);
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
 
@@ -496,14 +516,13 @@ describe("FleetList navigation", () => {
     await h.closeOverlay();
     await hub;
     await h.settleBar();
-    // …and it stays gone after the hub closes: the collapse was a dismissal.
-    expect(h.render()).toEqual([]);
-    // ↓ recalls it on demand.
+    // Closing the hub does not dismiss a previously visible bar.
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
     expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
   });
 
-  it("the popup entry (openHub with an agent) leaves the bar down after close too", async () => {
+  it("restores the bar after closing the popup agent viewer", async () => {
     const agent = makeRecord();
     const h = harness([agent]);
     const hub = h.fleet.openHub({ agentId: agent.id });
@@ -512,9 +531,36 @@ describe("FleetList navigation", () => {
     await h.closeOverlay();
     await hub;
     await h.settleBar();
-    expect(h.render()).toEqual([]);
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
     expect(h.press(DOWN)).toEqual({ consume: true });
-    expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+  });
+
+  it.each(["rejection", "synchronous throw"] as const)("restores bar visibility after a custom UI %s", async failure => {
+    for (const dismissed of [false, true]) {
+      const h = harness([makeRecord()]);
+      if (dismissed) {
+        h.press(DOWN);
+        h.press(RIGHT);
+      }
+      const error = new Error(`custom UI ${failure}`);
+      const custom = vi.spyOn(h.ui, "custom");
+      if (failure === "rejection") custom.mockRejectedValueOnce(error);
+      else custom.mockImplementationOnce(() => { throw error; });
+
+      try {
+        const hub = h.fleet.openHub({ agentId: "a1" });
+        expect(h.render()).toEqual([]);
+        await expect(hub).rejects.toThrow(error);
+        await h.settleBar();
+        expect(h.render().some(l => l.includes("← for agents"))).toBe(!dismissed);
+        expect(h.press(DOWN)).toEqual({ consume: true });
+        expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+      } finally {
+        custom.mockRestore();
+        h.fleet.dispose();
+      }
+    }
   });
 
   it("a runId opens the hub on the run's page, with the run selected", async () => {
@@ -551,6 +597,7 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
     await h.closeOverlay();
     await hub;
+    await h.settleBar();
     // The hub must not undelete the user's →: still dismissed…
     expect(h.render()).toEqual([]);
     // …and ↓ still recalls it.
@@ -584,6 +631,7 @@ describe("FleetList navigation", () => {
     h.press(DOWN); // user navigating the hub's own list
     await h.closeOverlay();
     await hub;
+    await h.settleBar();
     // The bar restores exactly as it was at open: still dismissed.
     expect(h.render()).toEqual([]);
     // …and ↓ recalls it afterwards, as before.
@@ -809,6 +857,28 @@ describe("FleetList overlay lifecycle", () => {
     }
   });
 
+  it("reports a rejected hub open from Enter without an unhandled rejection and restores the bar", async () => {
+    const h = harness([makeRecord()]);
+    const error = new Error("custom UI rejected");
+    const custom = vi.spyOn(h.ui, "custom").mockRejectedValueOnce(error);
+    try {
+      const rejections = await withUnhandledRejectionSpy(async () => {
+        h.press(DOWN); // activate (main)
+        h.press(DOWN); // select the agent
+        h.press(ENTER);
+        await new Promise(r => setTimeout(r, 20));
+      });
+
+      expect(rejections).toEqual([]);
+      expect(h.notices()).toContain(`error: Could not open agent hub: ${error.message}`);
+      await h.settleBar();
+      expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    } finally {
+      custom.mockRestore();
+      h.fleet.dispose();
+    }
+  });
+
   it("Enter on 'main' just deactivates (no overlay)", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // active, index 0 (main)
@@ -833,9 +903,8 @@ describe("FleetList overlay lifecycle", () => {
     agents.splice(0, 1);
     await h.closeOverlay();
     await h.settleBar();
-    // The hub leaves the bar closed now; ↓ recalls it — and the cursor
-    // still follows a2 ("two") to its new position, not whatever is at idx 2.
-    expect(h.render()).toEqual([]);
+    // The restored cursor follows a2 to its new position, not idx 2.
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
     expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");

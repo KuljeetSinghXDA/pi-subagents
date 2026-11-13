@@ -213,6 +213,10 @@ export interface AgentRecord {
   result?: string;
   error?: string;
   toolUses: number;
+  /** Tool call ids already counted in the current run; reset for a new resumed run. */
+  seenToolCalls?: Set<string>;
+  /** Number of active nested calls waiting for a child to return. */
+  waitingForChildren?: number;
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;

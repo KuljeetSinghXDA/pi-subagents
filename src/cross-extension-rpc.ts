@@ -81,7 +81,7 @@ export interface SpawnCapable {
    * Deliver a message to a running or queued agent's conversation — what
    * `steer_subagent` does. False when the agent is unknown or has settled.
    */
-  steer(id: string, message: string): boolean;
+  steer(id: string, message: string): Promise<boolean>;
 }
 
 export interface RpcDeps {
@@ -279,10 +279,10 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // handshake, like consume: additive and best-effort — but advertised in
   // `capabilities`, so a caller can tell whether it exists at all.
   const unsubSteer = wire<{ requestId: string; agentId: string; message: unknown }>(
-    "steer", ({ agentId, message }) => {
+    "steer", async ({ agentId, message }) => {
       if (typeof message !== "string" || message.trim().length === 0) throw new Error("Steer message must be a non-empty string");
       assertOwned(agentId);
-      if (!manager.steer(agentId, message)) throw new Error("Agent is not running");
+      if (!await manager.steer(agentId, message)) throw new Error("Agent is not running");
     },
   );
 

@@ -88,6 +88,8 @@ export class ConversationViewer implements Component, Focusable {
   private expanded = false;
   private keys: ViewerKeys;
   private composer: Input | undefined;
+  private sending = false;
+  private steerError: string | undefined;
 
   get composing(): boolean {
     return this.composer !== undefined;
@@ -114,7 +116,7 @@ export class ConversationViewer implements Component, Focusable {
     private done: (result: undefined) => void,
     private onStop?: () => void,
     keybindings?: ViewerKeybindings,
-    private onSteer?: (message: string) => void,
+    private onSteer?: (message: string) => Promise<boolean>,
     private showCost = false,
     scrollbarMode: ScrollViewScrollbar = "auto",
     private onBackground?: ViewerBackgroundAction,
@@ -160,6 +162,16 @@ export class ConversationViewer implements Component, Focusable {
       return;
     }
     if (this.composer) {
+      // A steer can hang. Keep a way out of the composer that does not cancel
+      // the in-flight steer: Esc/Ctrl+C dismiss the composer and leave
+      // `sending` set, so Enter cannot start a second steer until it settles.
+      if (this.sending) {
+        if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+          this.composer = undefined;
+          this.tui.requestRender();
+        }
+        return;
+      }
       this.composer.handleInput(data);
       this.tui.requestRender();
       return;
@@ -427,9 +439,12 @@ export class ConversationViewer implements Component, Focusable {
     if (this.composer) {
       this.composer.focused = this.focused;
       lines.push(row(this.composer.render(innerW)[0] ?? ""));
-      footerActions.push({ label: "Enter send", key: "\r" }, { label: "Esc cancel", key: "\x1b" });
-      const composeHint = th.fg("dim", "Enter send · Esc cancel");
-      const composeLeft = th.fg("accent", "✎ steer");
+      if (!this.sending) footerActions.push({ label: "Enter send", key: "\r" });
+      footerActions.push({ label: "Esc cancel", key: "\x1b" });
+      const composeHint = th.fg("dim", this.sending ? "Esc cancel" : "Enter send · Esc cancel");
+      const composeLeft = this.steerError
+        ? th.fg("error", `Failed to send: ${this.steerError}`)
+        : th.fg("accent", this.sending ? "Sending…" : "✎ steer");
       const composeGap = Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeHint));
       lines.push(row(composeLeft + " ".repeat(composeGap) + composeHint));
     } else if (isFooterShown(this.options)) {
@@ -487,7 +502,7 @@ export class ConversationViewer implements Component, Focusable {
   }
 
   private canSteer(): boolean {
-    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+    return !!this.onSteer && !this.sending && (this.record.status === "running" || this.record.status === "queued");
   }
 
   private canSendToBackground(): boolean {
@@ -497,11 +512,28 @@ export class ConversationViewer implements Component, Focusable {
   private openComposer(): void {
     const input = new Input();
     input.focused = true;
-    input.onSubmit = (value: string) => {
+    this.steerError = undefined;
+    input.onSubmit = async (value: string) => {
       const message = value.trim();
-      this.composer = undefined;
-      if (message) this.onSteer?.(message);
+      if (!message) {
+        this.composer = undefined;
+        this.tui.requestRender();
+        return;
+      }
+      this.sending = true;
+      this.steerError = undefined;
       this.tui.requestRender();
+      try {
+        if (!await this.onSteer?.(message)) throw new Error("Agent is not running");
+        // Esc can close the composer/viewer while the steer is in flight; a
+        // late resolution must not write to the disposed component.
+        if (!this.closed) this.composer = undefined;
+      } catch (err) {
+        if (!this.closed) this.steerError = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.sending = false;
+        if (!this.closed) this.tui.requestRender();
+      }
     };
     input.onEscape = () => {
       this.composer = undefined;
