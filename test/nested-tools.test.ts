@@ -278,6 +278,7 @@ describe("child-safe nested Agent tools", () => {
       run_in_background: true,
     });
     expect(launched.content[0].text).toContain("child-1");
+    expect(launched.content[0].text).toContain("You will be notified when this agent completes.");
     expect(spawn).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "scout", "Find them",
       expect.objectContaining({ isBackground: true, depth: 2, parentAgentId: "parent-1" }),
