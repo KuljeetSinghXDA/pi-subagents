@@ -192,6 +192,7 @@ export interface HubResumeState {
   page?: HubPage | undefined;
   focusId?: string | undefined;
   focusRunId?: string | undefined;
+  focusRunAgentIndex?: number | undefined;
   runId?: string | undefined;
   runAgentSel?: number;
   runItemSel?: number;
