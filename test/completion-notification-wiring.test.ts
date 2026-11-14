@@ -187,4 +187,80 @@ describe("background completion notification wiring", () => {
 
     await handlers.get("session_shutdown")?.();
   });
+
+  it("steers the owning parent subagent when its background nested child completes", async () => {
+    const parentSteer = vi.fn().mockResolvedValue("queued");
+    let resolveParent!: (value: Awaited<ReturnType<typeof runAgent>>) => void;
+    let resolveChild!: (value: Awaited<ReturnType<typeof runAgent>>) => void;
+    let resolveChild2!: (value: Awaited<ReturnType<typeof runAgent>>) => void;
+
+    vi.mocked(runAgent)
+      .mockImplementationOnce((_ctx, _type, _prompt, opts) => {
+        opts.onSessionCreated?.({
+          steer: parentSteer,
+          dispose: vi.fn(),
+          subscribe: vi.fn(() => () => {}),
+          messages: [],
+          getActiveToolNames: vi.fn(() => []),
+        } as never);
+        return new Promise((resolve) => { resolveParent = resolve; });
+      })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveChild = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveChild2 = resolve; }))
+      .mockResolvedValueOnce(completedRun());
+
+    const { pi, tools, handlers } = makePi();
+    subagentsExtension(pi);
+    const agentTool = tools.get("Agent")!;
+    const spawnRes = await agentTool.execute(
+      "parent-call",
+      { prompt: "orchestrate", description: "parent orchestrator", subagent_type: "general-purpose", run_in_background: true },
+      undefined,
+      undefined,
+      makeHeadlessCtx(),
+    ) as { content: Array<{ text: string }> };
+    const parentId = /Agent ID: (\S+)/.exec(spawnRes.content[0].text)![1];
+    const nestedRuntime = vi.mocked(runAgent).mock.calls.find(c => c[3].agentId === parentId)![3].nestedRuntime!;
+    const childId = nestedRuntime.manager.spawn(pi, makeHeadlessCtx(), "Explore", "find files", {
+      description: "nested explore",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+
+    resolveChild({ responseText: "found target.ts", session: { dispose: vi.fn() } as never, aborted: false, steered: false });
+    await nestedRuntime.manager.getRecord(childId)!.promise;
+
+    expect(parentSteer).toHaveBeenCalledTimes(1);
+    const notification = parentSteer.mock.calls[0][0] as string;
+    expect(notification).toContain("<task-notification>");
+    expect(notification).toContain(`<task-id>${childId}</task-id>`);
+    expect(notification).toContain("found target.ts");
+    expect(notification).toContain("get_subagent_result");
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    // Suppress duplicate steer when the parent is already awaiting the same child inline
+    // or when the child is a foreground spawn.
+    const parentRecord = nestedRuntime.manager.getRecord(parentId)!;
+    const child2Id = nestedRuntime.manager.spawn(pi, makeHeadlessCtx(), "Explore", "second", {
+      description: "awaited child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    parentRecord.waitingChildIds = new Set([child2Id]);
+    const child3Id = nestedRuntime.manager.spawn(pi, makeHeadlessCtx(), "Explore", "third", {
+      description: "foreground child",
+      isBackground: false,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    await nestedRuntime.manager.getRecord(child3Id)!.promise;
+    resolveChild2({ responseText: "second", session: { dispose: vi.fn() } as never, aborted: false, steered: false });
+    await nestedRuntime.manager.getRecord(child2Id)!.promise;
+    expect(parentSteer).toHaveBeenCalledTimes(1);
+
+    resolveParent(completedRun());
+    await handlers.get("session_shutdown")?.();
+  });
 });
