@@ -408,7 +408,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           // Worktree isolation starts the agent asynchronously; surface its
           // failure as a tool error, like the synchronous throw used to.
           await context.manager.awaitStartup(id);
-          return textResult(`Nested agent started in background. Agent ID: ${id}`);
+          return textResult(
+            `Nested agent started in background. Agent ID: ${id}\n` +
+            "You will be notified when this agent completes.\n" +
+            "Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.",
+          );
         }
 
         const { record } = await whileWaiting(context, () => context.manager.spawnAndWait(
