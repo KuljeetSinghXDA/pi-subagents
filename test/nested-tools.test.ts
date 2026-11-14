@@ -442,10 +442,12 @@ describe("child-safe nested Agent tools", () => {
     const controller = new AbortController();
     const pending = getResult.execute("wait", { agent_id: child.id, wait: true }, controller.signal, undefined, ctx());
     expect(parent.waitingForChildren).toBe(1);
+    expect(parent.waitingChildIds?.has(child.id)).toBe(true);
     const rejected = expect(pending).rejects.toThrow("cancelled");
     controller.abort(new Error("cancelled"));
     await rejected;
     expect(parent.waitingForChildren).toBe(0);
+    expect(parent.waitingChildIds?.has(child.id)).toBe(false);
     expect(child.resultConsumed).not.toBe(true);
   });
 

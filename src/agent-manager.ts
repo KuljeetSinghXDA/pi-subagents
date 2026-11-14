@@ -41,6 +41,7 @@ import {
   resumeRecord,
   settleOutcome,
 } from "./manager/resume-handler.js";
+import { waitForRecord } from "./manager/wait-for-record.js";
 import { WorktreeCoordinator } from "./manager/worktree-coordinator.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
@@ -530,6 +531,27 @@ export class AgentManager {
     for (const [id, record] of this.registry.agents) {
       if (record.parentAgentId === parentId) this.abort(id);
     }
+  }
+
+  /**
+   * Wait for at least one active background child owned by `parentId` to
+   * settle, plus any in-flight completion steers targeting `parentId`.
+   */
+  async waitForBackgroundChild(parentId: string, signal?: AbortSignal): Promise<boolean> {
+    const owner = this.registry.agents.get(parentId);
+    const active = [...this.registry.agents.values()].filter(
+      r => r.parentAgentId === parentId && r.isBackground === true && !r.resultConsumed &&
+        (r.status === "running" || r.status === "queued"),
+    );
+    if (active.length > 0) {
+      await Promise.race(active.map(r => waitForRecord(r, signal)));
+    }
+    let drained = false;
+    while (owner?.pendingChildNotifications && owner.pendingChildNotifications.size > 0) {
+      drained = true;
+      await Promise.all([...owner.pendingChildNotifications]);
+    }
+    return active.length > 0 || drained;
   }
 
   async spawnAndWait(
