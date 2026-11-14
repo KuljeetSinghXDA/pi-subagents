@@ -161,6 +161,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
   private viewerRows = 1;
   focusId: string | undefined;
   focusRunId: string | undefined;
+  focusRunAgentIndex: number | undefined;
   private readonly popup: boolean;
   page: HubPage = "R";
   runId: string | undefined;
@@ -199,6 +200,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
     this.page = this.resume.page ?? "R";
     this.focusId = this.resume.focusId;
     this.focusRunId = this.resume.focusRunId;
+    this.focusRunAgentIndex = this.resume.focusRunAgentIndex;
     this.runId = this.resume.runId;
     this.runAgentSel = this.resume.runAgentSel ?? 0;
     this.runItemSel = this.resume.runItemSel ?? 0;
@@ -471,6 +473,7 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
     this.resume.page = this.page;
     this.resume.focusId = this.focusId;
     this.resume.focusRunId = this.focusRunId;
+    this.resume.focusRunAgentIndex = this.focusRunAgentIndex;
     this.resume.runId = this.runId;
     this.resume.runAgentSel = this.runAgentSel;
     this.resume.runItemSel = this.runItemSel;
@@ -945,8 +948,22 @@ export class AgentHub implements Component, HubPaneHost, HubLogHost, AgentHubInp
   }
 
   clampRunAgentIndex(): number {
-    const max = Math.max(0, this.runAgents().length - 1);
+    const entries = this.runAgents();
+    if (entries.length === 0) {
+      this.runAgentSel = 0;
+      this.focusRunAgentIndex = undefined;
+      return 0;
+    }
+    if (this.focusRunAgentIndex !== undefined) {
+      const idx = entries.findIndex(e => e.index === this.focusRunAgentIndex);
+      if (idx !== -1) {
+        this.runAgentSel = idx;
+        return idx;
+      }
+    }
+    const max = entries.length - 1;
     this.runAgentSel = Math.min(Math.max(0, this.runAgentSel), max);
+    this.focusRunAgentIndex = entries[this.runAgentSel]?.index;
     return this.runAgentSel;
   }
 

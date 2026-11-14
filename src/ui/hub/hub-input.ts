@@ -35,6 +35,8 @@ export interface AgentHubInputHost {
   deps: AgentHubDeps;
   runId?: string;
   focusId?: string;
+  focusRunId?: string;
+  focusRunAgentIndex?: number;
 
   applyWheel(delta: number): void;
   runRowSelected(): boolean;
@@ -253,6 +255,7 @@ function enterPage(host: AgentHubInputHost, items: HubEntry[]): void {
     if (entry?.kind === "workflow") {
       host.runId = entry.workflow.id;
       host.runAgentSel = 0;
+      host.focusRunAgentIndex = undefined;
       host.runItemSel = currentPhaseIndex(runGroups(host as any, entry.workflow.id));
       host.page = "W";
       host.requestRender();
@@ -271,7 +274,10 @@ function enterPage(host: AgentHubInputHost, items: HubEntry[]): void {
       return;
     }
     const index = host.itemAgentIndex();
-    if (index !== undefined) host.runAgentSel = index;
+    if (index !== undefined) {
+      host.runAgentSel = index;
+      host.focusRunAgentIndex = host.runAgents()[index]?.index;
+    }
     host.page = "WA";
     host.requestRender();
   }
@@ -297,7 +303,10 @@ export function popPage(host: AgentHubInputHost): void {
   host.logScroll = 0;
   host.stopArmed = false;
   if (host.page === "R") {
-    host.focusId = host.rosterRecordForCurrent()?.id;
+    const rec = host.rosterRecordForCurrent();
+    host.focusId = rec?.id;
+    host.focusRunId = rec === undefined ? host.runId : undefined;
+    host.clampSelection();
   }
   if (host.page === "W") {
     host.runItemSel = host.pageGroups().length + host.clampRunAgentIndex();
@@ -326,10 +335,12 @@ function runAgentKey(host: AgentHubInputHost, kind: "skip" | "retry"): void {
 }
 
 function moveRunSelection(host: AgentHubInputHost, delta: 1 | -1): void {
-  if (host.runAgents().length === 0) return;
-  const next = Math.min(host.runAgents().length - 1, Math.max(0, host.clampRunAgentIndex() + delta));
+  const entries = host.runAgents();
+  if (entries.length === 0) return;
+  const next = Math.min(entries.length - 1, Math.max(0, host.clampRunAgentIndex() + delta));
   if (next === host.runAgentSel) return;
   host.runAgentSel = next;
+  host.focusRunAgentIndex = entries[next]?.index;
   host.stopArmed = false;
   if (host.page === "WA") host.focusId = undefined;
   host.requestRender();
@@ -343,7 +354,10 @@ export function moveRunItem(host: AgentHubInputHost, delta: number): void {
   const next = Math.min(length - 1, Math.max(0, host.clampRunItemIndex(groups, entries) + delta));
   if (next === host.runItemSel) return;
   host.runItemSel = next;
-  if (next >= groups.length) host.runAgentSel = next - groups.length;
+  if (next >= groups.length) {
+    host.runAgentSel = next - groups.length;
+    host.focusRunAgentIndex = entries[host.runAgentSel]?.index;
+  }
   host.stopArmed = false;
   host.requestRender();
 }
