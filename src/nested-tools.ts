@@ -90,6 +90,7 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
+  waitForBackgroundChild?(parentAgentId: string, signal?: AbortSignal): Promise<boolean>;
   resume(id: string, prompt: string, signal?: AbortSignal, options?: {
     maxTurns?: number;
     onAssistantUsage?: (usage: LifetimeUsage) => void;
@@ -222,7 +223,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
+          description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true to run in the background; you will receive a completion notification when it finishes (or can check with get_subagent_result).",
         }),
       ),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
@@ -445,9 +446,20 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // them, so poll — abortably — until they leave the queue, then await.
       if ((params.wait && (record.status === "running" || record.status === "queued")) ||
         (record.worktree && record.status !== "running" && record.status !== "queued" && record.status !== "paused")) {
-        await whileWaiting(context, () => waitForRecord(record, signal));
+        const owner = context.manager.getRecord(context.parentAgentId);
+        if (owner) {
+          owner.waitingChildIds ??= new Set();
+          owner.waitingChildIds.add(record.id);
+        }
+        try {
+          await whileWaiting(context, () => waitForRecord(record, signal));
+          consumeTerminalResult(record);
+        } finally {
+          owner?.waitingChildIds?.delete(record.id);
+        }
+      } else {
+        consumeTerminalResult(record);
       }
-      consumeTerminalResult(record);
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },
   });
