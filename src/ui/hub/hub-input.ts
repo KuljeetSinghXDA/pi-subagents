@@ -41,6 +41,7 @@ export interface AgentHubInputHost {
   stackedMode(): boolean;
   transcriptPage(): boolean;
   moveRosterSelection(direction: 1 | -1): void;
+  selectRosterIndex(index: number): void;
   clampSelection(): void;
   requestRender(): void;
   openFilter(): void;
@@ -192,23 +193,15 @@ export function dispatchHubInput(host: AgentHubInputHost, data: string): void {
   const row = items[host.selected];
 
   if (matchesKey(data, "down")) {
-    host.selected = Math.min(items.length - 1, host.selected + 1);
-    const entry = items[host.selected];
-    if (host.page === "R") host.focusId = entry?.kind === "agent" ? entry.record.id : undefined;
-    host.stopArmed = false;
-    host.requestRender();
+    host.moveRosterSelection(1);
     return;
   }
   if (matchesKey(data, "up")) {
-    host.selected = Math.max(0, host.selected - 1);
-    const entry = items[host.selected];
-    if (host.page === "R") host.focusId = entry?.kind === "agent" ? entry.record.id : undefined;
-    host.stopArmed = false;
-    host.requestRender();
+    host.moveRosterSelection(-1);
     return;
   }
-  if (matchesKey(data, "home")) { host.selected = 0; host.stopArmed = false; host.requestRender(); return; }
-  if (matchesKey(data, "end")) { host.selected = Math.max(0, items.length - 1); host.stopArmed = false; host.requestRender(); return; }
+  if (matchesKey(data, "home")) { host.selectRosterIndex(0); return; }
+  if (matchesKey(data, "end")) { host.selectRosterIndex(Math.max(0, items.length - 1)); return; }
 
   if (matchesKey(data, "enter")) {
     enterPage(host, items);
