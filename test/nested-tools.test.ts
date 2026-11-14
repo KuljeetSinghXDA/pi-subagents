@@ -90,12 +90,9 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
-  // A child inherits the main session's Agent guideline "you will be notified on
-  // completion", which is false for nested children: they send nothing and are
-  // stopped when the parent finishes. The tool's own description must say so.
-  it("tells the parent that background nested agents must be collected", () => {
+  it("tells the parent that background nested agents notify on completion", () => {
     const [agent] = tools();
-    expect(agent.description).toContain("does NOT notify you");
+    expect(agent.description).toContain("completion notification");
     expect(agent.description).toContain("get_subagent_result");
   });
 

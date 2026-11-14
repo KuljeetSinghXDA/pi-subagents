@@ -211,9 +211,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     description:
       "Launch a child-safe nested subagent for bounded delegated work. " +
       "Only use agent types allowed by this parent agent; nesting is depth-limited. " +
-      // Overrides the main session's inherited Agent guideline ("you will be
-      // notified on completion"), which does not hold for nested children.
-      "A background nested agent does NOT notify you when it finishes: collect each one with get_subagent_result (wait: true) before you end your turn, or it is stopped and its work is lost.",
+      "When run_in_background is true, you will receive a completion notification when it finishes; use get_subagent_result (wait: true) only if you need its output before continuing.",
     parameters: Type.Object({
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),

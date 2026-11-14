@@ -9,7 +9,7 @@ vi.mock("../src/agent-runner.js", async () => {
   };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
 interface RegisteredTool {
@@ -262,5 +262,40 @@ describe("background completion notification wiring", () => {
 
     resolveParent(completedRun());
     await handlers.get("session_shutdown")?.();
+  });
+
+  it("drains nested background child completion notifications on resumeAgent", async () => {
+    let queued = false;
+    const continueFn = vi.fn(async () => {
+      queued = false;
+    });
+    const fakeSession = {
+      messages: [{ role: "assistant", content: [{ type: "text", text: "waiting for child" }] }],
+      subscribe: () => () => {},
+      prompt: vi.fn(async () => {}),
+      agent: {
+        hasQueuedMessages: () => queued,
+        continue: continueFn,
+      },
+    } as never;
+
+    let waitCalls = 0;
+    const waitForBackgroundChild = vi.fn(async () => {
+      waitCalls++;
+      if (waitCalls === 1) {
+        queued = true;
+        return true;
+      }
+      return false;
+    });
+
+    const outcome = await resumeAgent(fakeSession, "check child", {
+      type: "general-purpose",
+      waitForBackgroundChild,
+    });
+
+    expect(waitForBackgroundChild).toHaveBeenCalledTimes(2);
+    expect(continueFn).toHaveBeenCalledTimes(1);
+    expect(outcome.failure).toBeUndefined();
   });
 });
