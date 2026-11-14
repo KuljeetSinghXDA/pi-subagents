@@ -603,6 +603,7 @@ export class AgentManager {
       abort: (id: string) => this.abort(id),
       drainQueue: () => this.drainQueue(),
       abortOwnedChildren: (id: string) => this.abortOwnedChildren(id),
+      waitForBackgroundChild: (parentId: string, sig?: AbortSignal) => this.waitForBackgroundChild(parentId, sig),
       onComplete: this.onComplete,
       onStart: this.onStart,
       onUsage: this.onUsage,
