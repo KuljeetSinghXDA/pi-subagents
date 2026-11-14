@@ -364,29 +364,34 @@ function buildSessionToolLoadout(
 ): SessionToolLoadout {
   const isolated = agentConfig?.isolated ?? options.isolated;
 
-  let model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
-  if (!options.model && !agentConfig?.model) {
-    const defaultModel = settingsManager.getDefaultModel?.();
-    if (defaultModel) {
-      const provider = settingsManager.getDefaultProvider?.() ?? ctx.model?.provider ?? "";
-      const found = ctx.modelRegistry.find(provider, defaultModel);
-      if (found) model = found;
+  let model = options.model;
+  if (options.resumeSessionFile === undefined) {
+    model ??= resolveDefaultModel(
+      ctx.model, ctx.modelRegistry, agentConfig?.model,
+    );
+    if (!options.model && !agentConfig?.model) {
+      const defaultModel = settingsManager.getDefaultModel?.();
+      if (defaultModel) {
+        const provider = settingsManager.getDefaultProvider?.() ?? ctx.model?.provider ?? "";
+        const found = ctx.modelRegistry.find(provider, defaultModel);
+        if (found) model = found;
+      }
+    }
+
+    if (!options.model && agentConfig?.model && resolveDefaultModel(undefined, ctx.modelRegistry, agentConfig.model) === undefined) {
+      const slashIdx = agentConfig.model.indexOf("/");
+      const notFound = slashIdx === -1
+        || !ctx.modelRegistry.find(agentConfig.model.slice(0, slashIdx), agentConfig.model.slice(slashIdx + 1));
+      options.onToolActivity?.({
+        type: "warning",
+        toolName: `model-error:model "${agentConfig.model}" pinned by agent "${type}" is ${notFound ? "not a known model" : "unavailable (provider not authenticated or model disabled)"} — running on the parent model instead`,
+      });
     }
   }
 
-  if (!options.model && agentConfig?.model && resolveDefaultModel(undefined, ctx.modelRegistry, agentConfig.model) === undefined) {
-    const slashIdx = agentConfig.model.indexOf("/");
-    const notFound = slashIdx === -1
-      || !ctx.modelRegistry.find(agentConfig.model.slice(0, slashIdx), agentConfig.model.slice(slashIdx + 1));
-    options.onToolActivity?.({
-      type: "warning",
-      toolName: `model-error:model "${agentConfig.model}" pinned by agent "${type}" is ${notFound ? "not a known model" : "unavailable (provider not authenticated or model disabled)"} — running on the parent model instead`,
-    });
-  }
-
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
+  const thinkingLevel = options.resumeSessionFile === undefined
+    ? (options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel)
+    : options.thinkingLevel;
 
   const disallowedSet: Set<string> | undefined = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -535,6 +540,43 @@ function reopenSession(file: string, parentSessionFile: string | undefined, sess
   return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
 }
 
+function restoreBranchModel(branch: readonly any[], modelRegistry: any): any {
+  let lastChangeIdx = -1;
+  for (let i = branch.length - 1; i >= 0; i--) {
+    if (branch[i]?.type === "model_change") {
+      lastChangeIdx = i;
+      break;
+    }
+  }
+  const lastChange = lastChangeIdx >= 0 ? branch[lastChangeIdx] : undefined;
+  const changeModel = lastChange?.provider && lastChange?.modelId
+    ? modelRegistry?.find?.(lastChange.provider, lastChange.modelId)
+    : undefined;
+  // Virtual model_change entries outrank assistant message rows because
+  // assistant rows record the routed physical provider/model instead.
+  if (changeModel?.api === "pi-virtual") return changeModel;
+  for (let i = branch.length - 1; i > lastChangeIdx; i--) {
+    const entry = branch[i];
+    if (entry?.type === "message" && entry.message?.role === "assistant" && entry.message.api !== "pi-virtual") {
+      const msgModel = entry.message.provider && entry.message.model
+        ? modelRegistry?.find?.(entry.message.provider, entry.message.model)
+        : undefined;
+      if (msgModel) return msgModel;
+    }
+  }
+  return changeModel;
+}
+
+function restoreBranchThinkingLevel(branch: readonly any[]): string | undefined {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry?.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+      return entry.thinkingLevel;
+    }
+  }
+  return undefined;
+}
+
 /**
  * SRP Phase 4: Session creation, extension binding, scope installation, and durable registry setup.
  */
@@ -542,6 +584,8 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
   session: AgentSession;
   registry: Registry;
   toolsFilter?: { remove: readonly ToolRegistration[] };
+  model: any;
+  thinkingLevel: any;
 }> {
   const {
     ctx, type, agentConfig, effectiveCwd, agentDir, loader, sessionSettingsManager,
@@ -562,6 +606,16 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
         })
       : SessionManager.inMemory(effectiveCwd);
 
+  const branch = options.resumeSessionFile && typeof (sessionManager as any).getBranch === "function"
+    ? (sessionManager as any).getBranch() as readonly any[]
+    : [];
+  const restoredModel = options.resumeSessionFile !== undefined
+    ? (model ?? restoreBranchModel(branch, ctx.modelRegistry))
+    : model;
+  const restoredThinkingLevel = options.resumeSessionFile !== undefined
+    ? (thinkingLevel ?? restoreBranchThinkingLevel(branch))
+    : thinkingLevel;
+
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown } | undefined)?.runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: any;
@@ -573,7 +627,7 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
     settingsManager: sessionSettingsManager,
     modelRegistry: ctx.modelRegistry,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
-    model,
+    model: restoredModel,
     tools: sessionTools,
     customTools,
     resourceLoader: loader,
@@ -581,11 +635,17 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
   if (sessionExcludeTools) {
     sessionOpts.excludeTools = sessionExcludeTools;
   }
-  if (thinkingLevel) {
-    sessionOpts.thinkingLevel = thinkingLevel;
+  if (restoredThinkingLevel) {
+    sessionOpts.thinkingLevel = restoredThinkingLevel;
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  const effectiveModel = options.resumeSessionFile !== undefined
+    ? (restoredModel ?? session.model ?? resolveDefaultModel(ctx.model, ctx.modelRegistry, agentConfig?.model))
+    : model;
+  const effectiveThinkingLevel = options.resumeSessionFile !== undefined
+    ? (restoredThinkingLevel ?? session.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel)
+    : thinkingLevel;
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -845,7 +905,7 @@ async function createDurableRegistryAndSession(params: CreateSessionParams): Pro
   }
 
   options.onSessionCreated?.(session);
-  return { session, registry, toolsFilter };
+  return { session, registry, toolsFilter, model: effectiveModel, thinkingLevel: effectiveThinkingLevel };
 }
 
 /**
@@ -1534,29 +1594,32 @@ export async function runAgent(
   );
 
   // 4. Instantiate session, bind extensions (including MCP), and build durable registry
-  const { session, registry, toolsFilter } = await createDurableRegistryAndSession({
-    ctx,
-    type,
-    agentConfig,
-    effectiveCwd,
-    agentDir: resourceContext.agentDir,
-    loader: resourceContext.loader,
-    sessionSettingsManager: resourceContext.sessionSettingsManager,
-    model: toolLoadout.model,
-    thinkingLevel: toolLoadout.thinkingLevel,
-    sessionTools: toolLoadout.sessionTools,
-    sessionExcludeTools: toolLoadout.sessionExcludeTools,
-    customTools: [...toolLoadout.nestedTools, ...toolLoadout.askTools, ...toolLoadout.structuredTools],
-    noExtensions: resourceContext.noExtensions,
-    nestedCallGate: resourceContext.nestedCallGate,
-    toolNames,
-    disallowedSet: toolLoadout.disallowedSet,
-    extNames: resourceContext.extNames,
-    narrowing: resourceContext.narrowing,
-    mcpToolPatterns: resourceContext.mcpToolPatterns,
-    readmitToolNames: toolLoadout.readmitToolNames,
-    options,
-  });
+  const { session, registry, toolsFilter, model: effectiveModel, thinkingLevel: effectiveThinkingLevel } =
+    await createDurableRegistryAndSession({
+      ctx,
+      type,
+      agentConfig,
+      effectiveCwd,
+      agentDir: resourceContext.agentDir,
+      loader: resourceContext.loader,
+      sessionSettingsManager: resourceContext.sessionSettingsManager,
+      model: toolLoadout.model,
+      thinkingLevel: toolLoadout.thinkingLevel,
+      sessionTools: toolLoadout.sessionTools,
+      sessionExcludeTools: toolLoadout.sessionExcludeTools,
+      customTools: [...toolLoadout.nestedTools, ...toolLoadout.askTools, ...toolLoadout.structuredTools],
+      noExtensions: resourceContext.noExtensions,
+      nestedCallGate: resourceContext.nestedCallGate,
+      toolNames,
+      disallowedSet: toolLoadout.disallowedSet,
+      extNames: resourceContext.extNames,
+      narrowing: resourceContext.narrowing,
+      mcpToolPatterns: resourceContext.mcpToolPatterns,
+      readmitToolNames: toolLoadout.readmitToolNames,
+      options,
+    });
+  toolLoadout.model = effectiveModel;
+  toolLoadout.thinkingLevel = effectiveThinkingLevel;
 
   // 5. Execute agent loop durably with NodeExecutionEnv and return observed results
   return executeDurableAgentPrompt(
